@@ -1,0 +1,363 @@
+---
+title: "projetS5Bilan"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r echo=FALSE}
+library(plyr)
+library(dplyr)
+library(magrittr)
+library(lubridate)
+library(ggplot2)
+library(tidyverse)
+library(sf)
+library(caret)
+library(class)
+library(factoextra)
+library(ggmap)
+library(osmdata)
+library(geosphere)
+library(grid)
+library(lattice)
+library(modeltools)
+library(stats4)
+library(flexclust)
+library(keras)
+```
+
+<!-- On télécharge une carte via stamen. -->
+<!-- ```{r echo=FALSE} -->
+<!-- mad_map <- get_stamenmap(c(left = 5.78, bottom = 43.02, right = 6.22, top = 43.2), maptype = "toner-hybrid", zoom = 15)  -->
+<!-- ggmap(mad_map) -->
+<!-- ``` -->
+
+
+# 1°) Carte de la fréquentation le 5 octobre à plusieurs créneaux horaires
+
+```{r echo=FALSE}
+dfLignes = df[,c("ARRET","LIGNE")]
+dfLignes = dfLignes[!duplicated(dfLignes$ARRET),]
+dfArrets = df[,c("ARRET","Latitude","Longitude")]
+dfArrets = dfArrets[!duplicated(dfArrets$ARRET),]
+dfArrets = merge(dfArrets,StatsArrets[,-c(3)],by.x=c("ARRET"),by.y = c("Var1"))
+dfArrets = merge(dfArrets,dfLignes, by = c("ARRET"))
+```
+
+
+
+Représentons les cartes des fréquentations des arrêts le 05/10/2019 sur certains blocs horaires :
+
+```{r echo=FALSE}
+valMin = min(na.omit(dfArrets[,seq(5,23)]))
+valMax = max(na.omit(dfArrets[,seq(5,23)]))
+
+for (k in c(5,9,14,17,21)){
+myplot <- ggmap(mad_map)+
+  geom_point(data=dfArrets, aes(x=Longitude, y=Latitude, color = dfArrets[,c(k)]),
+          alpha=.8,
+          size=0.1)+
+   labs(x="",y="")+scale_colour_gradientn(colours = rainbow(5),limits = c(0.,valMax))+
+  ggtitle(paste("Carte de la fréquentation le 5 octobre 2019 à",k,"h"))
+ggsave(paste("carte de la fréquentation des arrêts, à",k,"h le 05 octobre 2019.png"))
+}
+
+```
+
+# 2°) Clustering
+
+## 2.1°) Formatage des données pour être utilisées + vite
+On divise l'analyse en 4 parties : 
+- Jour de semaine + pas férié + pas vacances : dfTypeJour4
+- Jour de semaine + pas férié + vacances : dfTypeJour3
+- Samedi + pas férié : dfTypeJour2
+- Dimanche + férié : dfTypeJour1
+```{r echo=FALSE}
+dfTypeJour1 = subset.data.frame(df,df$TYPEJOUR == "Dimanche" | df$FERIE == 1)[,c("ARRET","HORAIRE")]
+dfTypeJour1$HORAIRE = hour(dfTypeJour1$HORAIRE)
+dfTypeJour1 = dfTypeJour1 %>% count(c("ARRET", "HORAIRE"))
+```
+
+```{r echo=FALSE}
+dfTypeJour2 = subset.data.frame(df,df$TYPEJOUR == "Samedi" & df$FERIE == 0)[,c("ARRET","HORAIRE")]
+dfTypeJour2$HORAIRE = hour(dfTypeJour2$HORAIRE)
+dfTypeJour2 = dfTypeJour2 %>% count(c("ARRET", "HORAIRE"))
+```
+
+
+```{r echo=FALSE}
+dfTypeJour3 = subset.data.frame(df,df$TYPEJOUR %in% c("Lundi","Mardi","Mercredi","Jeudi","Vendredi") & df$FERIE == 0 & df$SCOLAIRE == 1)[,c("ARRET","HORAIRE")]
+dfTypeJour3$HORAIRE = hour(dfTypeJour3$HORAIRE)
+dfTypeJour3 = dfTypeJour3 %>% count(c("ARRET", "HORAIRE"))
+```
+
+
+```{r echo=FALSE}
+dfTypeJour4 = subset.data.frame(df,df$TYPEJOUR %in% c("Lundi","Mardi","Mercredi","Jeudi","Vendredi") & df$FERIE == 0 & df$SCOLAIRE == 0)[,c("ARRET","HORAIRE")]
+dfTypeJour4$HORAIRE = hour(dfTypeJour4$HORAIRE)
+dfTypeJour4 = dfTypeJour4 %>% count(c("ARRET", "HORAIRE"))
+```
+
+
+Listons les arrêts et heures à considérer :
+```{r echo=FALSE}
+labels = StatsArrets$Var1
+heures = c(0,1,seq(5,23))
+```
+
+Pour mettre à l'échelle entre 0 et 1 :
+```{r echo=FALSE}
+echelle <- function(df){
+  for (k in 1:length(df[1,])){
+    maximum = max(na.omit(df[,k]))
+    minimum = min(na.omit(df[,k]))
+    df[,k] = (df[,k]-minimum)/(maximum-minimum)
+  }
+  return(df)
+}
+```
+
+On crée des tableaux de données dfi normalisés qui contiennent les fréquentations par heure (colonnes) suivant chaque arrêt (1 arrêt/ligne). On tire les colonnes d'heures nulles. Les dfTypeJouri contiendront les tableaux non normalisés des fréquentations par heure (colonne) suivant chaque arrêt (ligne) et on ne tire pas les colonnes nulles (0 transit pendant 1h).
+```{r echo=FALSE}
+df1 = data.frame(matrix(0, ncol = 24, nrow = 930))
+rownames(df1) <- labels
+for (k in 1:length(dfTypeJour1[,1])){
+  df1[c(dfTypeJour1$ARRET[k]),dfTypeJour1$HORAIRE[k]+1]=dfTypeJour1$freq[k]
+}
+dfTypeJour1 = df1
+df1 <- echelle(df1)
+df1 = df1[ , colSums(is.na(df1)) < nrow(df1)]
+
+df2 = data.frame(matrix(0, ncol = 24, nrow = 930))
+rownames(df2) <- labels
+for (k in 1:length(dfTypeJour2[,1])){
+  df2[c(dfTypeJour2$ARRET[k]),dfTypeJour2$HORAIRE[k]+1]=dfTypeJour2$freq[k]
+}
+dfTypeJour2 = df2
+df2 <- echelle(df2)
+df2 = df2[ , colSums(is.na(df2)) < nrow(df2)]
+
+df3 = data.frame(matrix(0, ncol = 24, nrow = 930))
+rownames(df3) <- labels
+for (k in 1:length(dfTypeJour3[,1])){
+  df3[c(dfTypeJour3$ARRET[k]),dfTypeJour3$HORAIRE[k]+1]=dfTypeJour3$freq[k]
+}
+dfTypeJour3 = df3
+df3 <- echelle(df3)
+df3 = df3[ , colSums(is.na(df3)) < nrow(df3)]
+
+df4 = data.frame(matrix(0, ncol = 24, nrow = 930))
+rownames(df4) <- labels
+for (k in 1:length(dfTypeJour4[,1])){
+  df4[c(dfTypeJour4$ARRET[k]),dfTypeJour4$HORAIRE[k]+1]=dfTypeJour4$freq[k]
+}
+dfTypeJour4 = df4
+df4 <- echelle(df4)
+df4 = df4[ , colSums(is.na(df4)) < nrow(df4)]
+
+```
+
+Regroupons les données horaires associées à tous ces types de jours pour les analyser.
+```{r echo=FALSE}
+dataAClusterParArret = cbind(df1,df2,df3,df4)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+## 2.2°) Choix de la métrique
+
+On teste 3 métriques de k-représentants : 
+- mahalanobis (kmeans), 
+- euclidienne (kmeans),
+- manhattan (kmedians).
+
+On fait également varier k entre 2 et 8 pour l'optimiser.
+
+
+Euclidienne
+```{r echo=FALSE}
+listeSilhouettesEuclidiennes = c()
+for (k in 2:8){
+  res = kcca(dataAClusterParArret, k, family=kccaFamily(dist=distEuclidean), save.data=TRUE)
+  listeSilhouettesEuclidiennes = c(listeSilhouettesEuclidiennes,mean(attr(Silhouette(res),"values"))) 
+}
+```
+
+Manhattan
+```{r echo=FALSE}
+listeSilhouettesManhattan = c()
+for (k in 2:8){
+  res = kcca(dataAClusterParArret, k, family=kccaFamily(dist=distManhattan), save.data=TRUE)
+  listeSilhouettesManhattan = c(listeSilhouettesManhattan,mean(attr(Silhouette(res),"values"))) 
+}
+```
+
+Pour la métrique de Mahalanobis, la stratégie est de normaliser les données par la méthode de la décomposition de Cholesky plutôt et d'ensuite faire un kmeans.
+```{r echo=FALSE}
+dataMahalanobisACluster = cbind(dfTypeJour1,dfTypeJour2,dfTypeJour3,dfTypeJour4)
+dataMahalanobisACluster = dataMahalanobisACluster[, colSums(dataMahalanobisACluster != 0) > 0]
+C <- var(dataMahalanobisACluster)
+C <- C[ , colSums(is.na(C)) < nrow(C)]
+C <- chol(C)
+dataMahalanobisACluster <- as.matrix(dataMahalanobisACluster) %*% solve(C)
+
+listeSilhouettesMahalanobis = c()
+for (k in 2:8){
+  res = kcca(dataMahalanobisACluster, k, family=kccaFamily(dist=distEuclidean), save.data=TRUE)
+  listeSilhouettesMahalanobis = c(listeSilhouettesMahalanobis,mean(attr(Silhouette(res),"values"))) 
+}
+```
+
+Représentons ces résultats : 
+```{r echo=FALSE}
+dfSilhouettes = data.frame(k = seq(2,8), Manhattan = listeSilhouettesManhattan, Euclidienne  = listeSilhouettesEuclidiennes,Mahalanobis = listeSilhouettesMahalanobis)
+dfSilhouettes <- dfSilhouettes %>%
+  dplyr::select(k, Manhattan, Euclidienne, Mahalanobis) %>%
+  gather(key = "variable", value = "value", -k)
+
+
+ggplot(dfSilhouettes,aes(x = k, y = value)) + 
+  geom_line(aes(color = variable)) + 
+  scale_color_manual(values = c("#BD33A4", "steelblue","#16B84E"))+theme_bw()
+```
+Conclusion : on retient la distance de Manhattan et k = 4.
+
+## 2.3°) Clustering avec k = 4 et kmedians
+```{r echo=FALSE}
+resManhattan = kcca(dataAClusterParArret, 4, family=kccaFamily(dist=distManhattan), save.data=TRUE)
+```
+
+
+Représentation des clusters suivant deux dimensions à choisir du jeu de données initial :
+```{r echo=FALSE}
+plot(resManhattan,points = TRUE,number = FALSE,hull = TRUE)
+```
+
+
+Représentation des trajets/h en moyenne pour chaque cluster suivant le type de jour (GR1 de 0 à 23, GR2 de 24 à 48...) :
+```{r echo=FALSE}
+dfTousTypesJours = cbind(dfTypeJour1,dfTypeJour2,dfTypeJour3,dfTypeJour4)
+dfclusteringTousTypesJours = data.frame(ARRET = labels, GR =resManhattan@cluster )
+ggplot(data.frame(t= seq(0,95),Y1=colMeans(data.frame(dfTousTypesJours)[labels %in% dfclusteringTousTypesJours[dfclusteringTousTypesJours$GR == 1,]$ARRET,]),Y2=colMeans(data.frame(dfTousTypesJours)[labels %in% dfclusteringTousTypesJours[dfclusteringTousTypesJours$GR == 2,]$ARRET,]),Y3=colMeans(data.frame(dfTousTypesJours)[labels %in% dfclusteringTousTypesJours[dfclusteringTousTypesJours$GR == 3,]$ARRET,]),Y4=colMeans(data.frame(dfTousTypesJours)[labels %in% dfclusteringTousTypesJours[dfclusteringTousTypesJours$GR == 4,]$ARRET,])),aes(x = t, y = value)) + 
+                    geom_line(aes(y=Y1),color="black")+geom_line(aes(y=Y2),color="#87E990")+geom_line(aes(y=Y3),color="#CF0A1D")+geom_line(aes(y=Y4),color="#048B9A")+ggtitle("Moyennes de trajets/h suivant les clusters")
+
+```
+
+Ajoutons des colonnes latitude et longitude à notre tableau d'arrêts clusterisés :
+```{r echo=FALSE}
+dfMapGroupeManhattan = merge(dfArrets[,c(1,2,3)],dfclusteringTousTypesJours,by.y = c("ARRET"),by.x = c("ARRET"))
+```
+
+
+## 2.4°) Cartographie des clusters
+Représentons les clusters d'arrêts sur une carte :
+```{r echo=FALSE}
+colors <- c("2" = "#87E990", "4" = "#048B9A", "3" = "#CF0A1D", "1"="black")
+ggmap(mad_map)+
+  geom_point(data=dfMapGroupeManhattan, mapping = aes(x=Longitude, y=Latitude,color = factor(GR)),
+          size=0.1, alpha = 0.8
+          )+scale_color_manual(values = colors)+  geom_text(data=dfMapGroupeManhattan,aes(x=Longitude, y=Latitude,label = as.factor(ARRET)), size = 0.2,hjust=0)+
+   labs(x="",y="")
+ggsave("Manhattan.pdf")
+```
+
+
+
+
+
+## 2.5°) Recherche des lieux d'intérêt dans Toulon (via open street map)
+```{r echo=FALSE}
+for (k in c("theatre","cinema","bar","cafe","pub","restaurant","fastfood","school","college","university","marketplace","doctors","hospital")){
+  q <- getbb("Toulon")%>%
+      opq()%>%
+       add_osm_feature("amenity", k)
+  assign(paste0(k,"OSM"),data.frame(st_coordinates(osmdata_sf(q)$osm_points)))
+}
+
+```
+
+```{r echo=FALSE}
+q <- getbb("Toulon")%>%
+      opq()%>%
+       add_osm_feature("tourism","museum")
+museumOSM <- data.frame(st_coordinates(osmdata_sf(q)$osm_points))
+```
+
+
+```{r echo=FALSE}
+q <- getbb("Toulon")%>%
+      opq()%>%
+       add_osm_feature("shop")
+shopOSM <- data.frame(st_coordinates(osmdata_sf(q)$osm_points))
+```
+
+```{r echo=FALSE}
+q <- getbb("Toulon")%>%
+      opq()%>%
+       add_osm_feature("office")
+officeOSM <- data.frame(st_coordinates(osmdata_sf(q)$osm_points))
+```
+
+
+```{r echo=FALSE}
+dfProximiteArret = data.frame(labels)
+arretsA150m <- function(lieux){
+  
+  listearrets = c()
+  for( k in 1:930){
+    i=1
+    while (i <= length(lieux$X)){
+      if (distHaversine(lieux[i,], as.numeric(dfArrets[k,c(3,2)])) < 150.){
+        i = length(lieux$X)
+        listearrets = c(listearrets,dfArrets$ARRET[k])
+      }
+      i=i+1
+    }
+  }
+  return (listearrets)
+  
+}
+arrets150mEcole = arretsA150m(schoolOSM)
+arrets150mBureaux = arretsA150m(officeOSM)
+arrets150mMagasins = arretsA150m(shopOSM)
+arrets150mRestaurants = arretsA150m(rbind(rbind(restaurantOSM,cafeOSM),barOSM))
+arrets150mCinema = arretsA150m(cinemaOSM)
+```
+
+## 2.6°) Représentation de la proportion des arrêts par cluster à côté de lieux d'intérêt
+```{r echo=FALSE}
+histoLieu <- function(GR,dfKMEANS){
+  dfLieuxPresGR = data.frame(Lieu = c(), Groupe = c(), Proportion = c())
+for (k in 1:4){
+  dfLieuxPresGR = rbind(dfLieuxPresGR,data.frame(Lieu = c("Ecole","Bureaux","Magasins","Restaurants","Cinema"),Groupe = c(k,k,k,k,k), Proportion = c(mean(dfKMEANS[dfKMEANS[,c(GR)] == k,]$ARRET %in% arrets150mEcole),mean(dfKMEANS[dfKMEANS[,c(GR)] == k,]$ARRET %in% arrets150mBureaux),mean(dfKMEANS[dfKMEANS[,c(GR)] == k,]$ARRET %in% arrets150mMagasins),mean(dfKMEANS[dfKMEANS[,c(GR)] == k,]$ARRET%in% arrets150mRestaurants),mean(dfKMEANS[dfKMEANS[,c(GR)] == k,]$ARRET %in% arrets150mCinema))))
+}
+
+df_cumsum <- ddply(dfLieuxPresGR, "Groupe",
+                   transform, label_ypos=cumsum(Proportion))
+
+ggplot(data=df_cumsum, aes(x=Groupe, y=Proportion, fill=Lieu)) +
+  geom_bar(stat="identity")+
+  scale_fill_brewer(palette="Set2")+
+  theme_minimal()+ggtitle(paste("Groupe",GR))
+}
+
+```
+
+```{r echo=FALSE}
+histoLieu("GR",dfclusteringTousTypesJours)
+```
