@@ -1,0 +1,421 @@
+---
+title: "Projet Transdev"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(plyr)
+library(dplyr)
+library(magrittr)
+library(lubridate)
+library(ggplot2)
+library(tidyverse)
+library(sf)
+library(caret)
+library(class)
+library(factoextra)
+library(ggmap)
+library(osmdata)
+library(geosphere)
+library(grid)
+library(lattice)
+library(modeltools)
+library(stats4)
+library(flexclust)
+library(keras)
+```
+
+# 2°) Clustering des lignes 
+
+## 2.1°) Préparation des données
+
+```{r echo=FALSE}
+dfTypeJour1_ligne = subset.data.frame(df,df$TYPEJOUR == "Dimanche" | df$FERIE == 1)[,c("LIGNE","HORAIRE")]
+dfTypeJour1_ligne$HORAIRE = hour(dfTypeJour1_ligne$HORAIRE)
+dfTypeJour1_ligne = dfTypeJour1_ligne %>% count(c("LIGNE", "HORAIRE"))
+```
+
+```{r echo=FALSE}
+dfTypeJour2_ligne = subset.data.frame(df,df$TYPEJOUR == "Samedi" & df$FERIE == 0)[,c("LIGNE","HORAIRE")]
+dfTypeJour2_ligne$HORAIRE = hour(dfTypeJour2_ligne$HORAIRE)
+dfTypeJour2_ligne = dfTypeJour2_ligne %>% count(c("LIGNE", "HORAIRE"))
+```
+
+```{r echo=FALSE}
+dfTypeJour3_ligne = subset.data.frame(df,df$TYPEJOUR %in% c("Lundi","Mardi","Mercredi","Jeudi","Vendredi") & df$FERIE == 0 & df$SCOLAIRE == 1)[,c("LIGNE","HORAIRE")]
+dfTypeJour3_ligne$HORAIRE = hour(dfTypeJour3_ligne$HORAIRE)
+dfTypeJour3_ligne = dfTypeJour3_ligne %>% count(c("LIGNE", "HORAIRE"))
+```
+
+```{r echo=FALSE}
+dfTypeJour4_ligne = subset.data.frame(df,df$TYPEJOUR %in% c("Lundi","Mardi","Mercredi","Jeudi","Vendredi") & df$FERIE == 0 & df$SCOLAIRE == 0)[,c("LIGNE","HORAIRE")]
+dfTypeJour4_ligne$HORAIRE = hour(dfTypeJour4_ligne$HORAIRE)
+dfTypeJour4_ligne = dfTypeJour4_ligne %>% count(c("LIGNE", "HORAIRE"))
+```
+
+```{r echo=FALSE}
+labels_ligne = StatsLignes$Var1
+heures = c(0,1,seq(5,23))
+```
+
+```{r echo=FALSE}
+df1_ligne = data.frame(matrix(0, ncol = 24, nrow = 53))
+rownames(df1_ligne) <- labels_ligne
+for (k in 1:length(dfTypeJour1_ligne[,1])){
+  df1_ligne[c(dfTypeJour1_ligne$LIGNE[k]),dfTypeJour1_ligne$HORAIRE[k]+1]=dfTypeJour1_ligne$freq[k]
+}
+dfTypeJour1_ligne = df1_ligne
+df1_ligne <- echelle(df1_ligne)
+df1_ligne = df1_ligne[ , colSums(is.na(df1_ligne)) < nrow(df1_ligne)]
+df1_ligne <- na.omit(df1_ligne)
+```
+
+```{r echo=FALSE}
+df2_ligne = data.frame(matrix(0, ncol = 24, nrow = 53))
+rownames(df2_ligne) <- labels_ligne
+for (k in 1:length(dfTypeJour2_ligne[,1])){
+  df2_ligne[c(dfTypeJour2_ligne$LIGNE[k]),dfTypeJour2_ligne$HORAIRE[k]+1]=dfTypeJour2_ligne$freq[k]
+}
+dfTypeJour2_ligne = df2_ligne
+df2_ligne <- echelle(df2_ligne)
+df2_ligne = df2_ligne[ , colSums(is.na(df2_ligne)) < nrow(df2_ligne)]
+df2_ligne <- na.omit(df2_ligne)
+```
+
+```{r echo=FALSE}
+df3_ligne = data.frame(matrix(0, ncol = 24, nrow = 53))
+rownames(df3_ligne) <- labels_ligne
+for (k in 1:length(dfTypeJour3_ligne[,1])){
+  df3_ligne[c(dfTypeJour3_ligne$LIGNE[k]),dfTypeJour3_ligne$HORAIRE[k]+1]=dfTypeJour3_ligne$freq[k]
+}
+dfTypeJour3_ligne = df3_ligne
+df3_ligne <- echelle(df3_ligne)
+df3_ligne = df3_ligne[ , colSums(is.na(df3_ligne)) < nrow(df3_ligne)]
+df3_ligne <- na.omit(df3_ligne)
+df3_ligne["70",] <- df3_ligne[54,]
+df3_ligne["180",] <- df3_ligne[55,]
+df3_ligne["280",] <- df3_ligne[56,]
+df3_ligne <- df3_ligne[-54:-56,]
+```
+
+```{r echo=FALSE}
+df4_ligne = data.frame(matrix(0, ncol = 24, nrow = 53))
+rownames(df4_ligne) <- labels_ligne
+for (k in 1:length(dfTypeJour4_ligne[,1])){
+  df4_ligne[c(dfTypeJour4_ligne$LIGNE[k]),dfTypeJour4_ligne$HORAIRE[k]+1]=dfTypeJour4_ligne$freq[k]
+}
+dfTypeJour4_ligne = df4_ligne
+df4_ligne <- echelle(df4_ligne)
+df4_ligne = df4_ligne[ , colSums(is.na(df4_ligne)) < nrow(df4_ligne)]
+df4_ligne <- na.omit(df4_ligne)
+df4_ligne["70",] <- df4_ligne[54,]
+df4_ligne["180",] <- df4_ligne[55,]
+df4_ligne <- df4_ligne[-54:-55,]
+```
+
+```{r echo=FALSE}
+dataAClusterParLigne = cbind(df1_ligne,df2_ligne,df3_ligne,df4_ligne)
+```
+
+## 2.2) Classification Ascendante Hiérarchique 
+
+```{r}
+# calcul des distances euclidiennes entre les points 
+lignes.dist <- dist(dataAClusterParLigne)
+```
+
+
+```{r}
+cah.ward <- hclust(lignes.dist, method="ward.D")
+print(cah.ward)
+```
+```{r}
+plot(cah.ward)
+```
+```{r}
+groupes.cah <- cutree(cah.ward,k=4)
+```
+
+Affichage du dendrogramme pour un nb de clusters choisi
+```{r}
+# remplacer 4 par le nb de clusters choisi
+nbClasses=4
+source("http://addictedtor.free.fr/packages/A2R/lastVersion/R/code.R")
+ordreClasses <- unique(groupes.cah[cah.ward$order])
+cPal <- c(1:nbClasses)[ordreClasses]
+
+A2Rplot(x = cah.ward,
+        k = nbClasses,
+        boxes = FALSE,
+        col.up = "gray50",
+        col.down = cPal,
+        show.labels = TRUE,
+        
+        main = "Dendrogramme")
+
+legend(x="topleft",
+       paste("Cluster",
+             1:nbClasses,
+             sep=" "),
+       cex=1,
+       seg.len=4,
+       col=cPal,
+       pch=NA,
+       lty=1,
+lwd=4)
+```
+```{r}
+groupes.cah[cah.ward$order]
+```
+
+
+```{r}
+#cluster1=list()
+#for (k in 1:length( groupes.cah )){
+#  if ( unname(groupes.cah[k]) == 1 )
+#    cluster1 <-  c(cluster1, names( groupes.cah[k]  ))
+#}
+#print(cluster1)
+```
+
+
+## 2.2) Représentations des clusters
+
+Représentation des trajets/h en moyenne pour chaque cluster suivant le type de jour (GR1 de 0 à 23, GR2 de 24 à 48...) :
+```{r}
+dfTousTypesJours_ligne = cbind(dfTypeJour1_ligne,dfTypeJour2_ligne,dfTypeJour3_ligne,dfTypeJour4_ligne)
+dfTousTypesJours_ligne <- na.omit(dfTousTypesJours_ligne)
+```
+
+Affichage pour 4 clusters
+```{r}
+new_df <-  t ( data.frame( cluster1= rep(0, times=96) , cluster2= rep(0, times=96), cluster3= rep(0, times=96), cluster4=rep(0, times=96) ) ) 
+
+s1 <- 0
+s2 <- 0
+s3 <- 0
+s4 <- 0
+
+for (i in 1:53) 
+  if ( unname(groupes.cah)[i]==1 ){
+    s1 <- s1 + 1
+    for (k in 1:96)
+      new_df[1,k] = new_df[1,k] + dfTousTypesJours_ligne[i,k]
+  } else if ( unname(groupes.cah)[i]==2 ) {
+    s2 <- s2 + 1
+    for (k in 1:96)
+      new_df[2,k] = new_df[2,k] + dfTousTypesJours_ligne[i,k]
+ } else if ( unname(groupes.cah)[i]==3 ){
+    s3 <- s3 + 1
+    for (k in 1:96)
+      new_df[3,k] = new_df[3,k] + dfTousTypesJours_ligne[i,k]
+ } else if ( unname(groupes.cah)[i]==4 ){
+    s4 <- s4 + 1
+    for (k in 1:96)
+      new_df[4,k] = new_df[4,k] + dfTousTypesJours_ligne[i,k]
+ }
+
+for (i in 1:53) 
+  new_df[1,i] = new_df[1,i] / s1
+  new_df[2,i] = new_df[2,i] / s2
+  new_df[3,i] = new_df[3,i] / s3
+  new_df[4,i] = new_df[4,i] / s4
+```
+
+```{r}
+new_df3 <-  data.frame( nb= rep(0, times=384) , cluster= rep(0, times=384), heure = rep(seq(1:96), times=4)) 
+
+for (i in 1:96){
+  new_df3[i,1]  <-   new_df["cluster1",i]
+  new_df3[i,2]  =   1
+}
+for (i in 97:192){
+  new_df3[i,1]  <-   new_df["cluster2",i-96]
+  new_df3[i,2]  <-   2
+}
+for (i in 193:288){
+  new_df3[i,1]  <-   new_df["cluster3",i-192]
+  new_df3[i,2]  <-   3
+}
+for (i in 289:384){
+  new_df3[i,1]  <-   new_df["cluster4",i-288]
+  new_df3[i,2]  <-   4
+}
+
+ggplot(new_df3, aes(x= heure, y= nb, colour=cluster ))  + ggtitle("Moyennes de trajets/h suivant les clusters") + geom_point()
+```
+Affichage pour 2 clusters
+```{r}
+new_df <-  t ( data.frame( cluster1= rep(0, times=96) , cluster2= rep(0, times=96) ) )
+
+s1 <- 0
+s2 <- 0
+
+for (i in 1:53) 
+  if ( unname(groupes.cah)[i]==1 ){
+    s1 <- s1 + 1
+    for (k in 1:96)
+      new_df[1,k] = new_df[1,k] + dfTousTypesJours_ligne[i,k]
+  } else if ( unname(groupes.cah)[i]==2 ) {
+    s2 <- s2 + 1
+    for (k in 1:96)
+      new_df[2,k] = new_df[2,k] + dfTousTypesJours_ligne[i,k]
+ } 
+
+for (i in 1:53) 
+  new_df[1,i] = new_df[1,i] / s1
+  new_df[2,i] = new_df[2,i] / s2
+```
+
+```{r}
+new_df3 <-  data.frame( nb= rep(0, times=192) , cluster= rep(0, times=192), heure = rep(seq(1:96), times=2)) 
+
+for (i in 1:96){
+  new_df3[i,1]  <-   new_df["cluster1",i]
+  new_df3[i,2]  =   1
+}
+for (i in 97:192){
+  new_df3[i,1]  <-   new_df["cluster2",i-96]
+  new_df3[i,2]  <-   2
+}
+
+ggplot(new_df3, aes(x= heure, y= nb, colour=cluster ))  + ggtitle("Moyennes de trajets/h suivant les clusters") + geom_point()
+```
+
+
+Affichage pour 6 clusters
+```{r}
+new_df <-  t ( data.frame( cluster1= rep(0, times=96) , cluster2= rep(0, times=96), cluster3= rep(0, times=96), cluster4=rep(0, times=96), cluster5= rep(0, times=96), cluster6=rep(0, times=96) ) )
+
+s1 <- 0
+s2 <- 0
+s3 <- 0
+s4 <- 0
+s5 <- 0
+s6 <- 0
+
+for (i in 1:53) 
+  if ( unname(groupes.cah)[i]==1 ){
+    s1 <- s1 + 1
+    for (k in 1:96)
+      new_df[1,k] = new_df[1,k] + dfTousTypesJours_ligne[i,k]
+  } else if ( unname(groupes.cah)[i]==2 ) {
+    s2 <- s2 + 1
+    for (k in 1:96)
+      new_df[2,k] = new_df[2,k] + dfTousTypesJours_ligne[i,k]
+ } else if ( unname(groupes.cah)[i]==3 ){
+    s3 <- s3 + 1
+    for (k in 1:96)
+      new_df[3,k] = new_df[3,k] + dfTousTypesJours_ligne[i,k]
+ } else if ( unname(groupes.cah)[i]==4 ){
+    s4 <- s4 + 1
+    for (k in 1:96)
+      new_df[4,k] = new_df[4,k] + dfTousTypesJours_ligne[i,k]
+ } else if ( unname(groupes.cah)[i]==5 ){
+    s5 <- s5 + 1
+    for (k in 1:96)
+      new_df[5,k] = new_df[5,k] + dfTousTypesJours_ligne[i,k]
+ } else if ( unname(groupes.cah)[i]==6 ){
+    s6 <- s6 + 1
+    for (k in 1:96)
+      new_df[6,k] = new_df[6,k] + dfTousTypesJours_ligne[i,k]
+ }
+
+for (i in 1:53) 
+  new_df[1,i] = new_df[1,i] / s1
+  new_df[2,i] = new_df[2,i] / s2
+  new_df[3,i] = new_df[3,i] / s3
+  new_df[4,i] = new_df[4,i] / s4
+  new_df[5,i] = new_df[5,i] / s5
+  new_df[6,i] = new_df[6,i] / s6
+```
+
+```{r}
+new_df3 <-  data.frame( nb= rep(0, times=576) , cluster= rep(0, times=576), heure = rep(seq(1:96), times=6)) 
+
+for (i in 1:96){
+  new_df3[i,1]  <-   new_df["cluster1",i]
+  new_df3[i,2]  =   1
+}
+for (i in 97:192){
+  new_df3[i,1]  <-   new_df["cluster2",i-96]
+  new_df3[i,2]  <-   2
+}
+for (i in 193:288){
+  new_df3[i,1]  <-   new_df["cluster3",i-192]
+  new_df3[i,2]  <-   3
+}
+for (i in 289:384){
+  new_df3[i,1]  <-   new_df["cluster4",i-288]
+  new_df3[i,2]  <-   4
+}
+
+for (i in 385:480){
+  new_df3[i,1]  <-   new_df["cluster3",i-384]
+  new_df3[i,2]  <-   5
+}
+for (i in 481:576){
+  new_df3[i,1]  <-   new_df["cluster4",i-480]
+  new_df3[i,2]  <-   6
+}
+
+ggplot(new_df3, aes(x= heure, y= nb, colour=cluster ))  + ggtitle("Moyennes de trajets/h suivant les clusters") + geom_point()
+```
+
+Affichage pour 3 clusters
+```{r}
+new_df <-  t ( data.frame( cluster1= rep(0, times=96) , cluster2= rep(0, times=96), cluster3= rep(0, times=96) )) 
+
+s1 <- 0
+s2 <- 0
+s3 <- 0
+
+for (i in 1:53) 
+  if ( unname(groupes.cah)[i]==1 ){
+    s1 <- s1 + 1
+    for (k in 1:96)
+      new_df[1,k] = new_df[1,k] + dfTousTypesJours_ligne[i,k]
+  } else if ( unname(groupes.cah)[i]==2 ) {
+    s2 <- s2 + 1
+    for (k in 1:96)
+      new_df[2,k] = new_df[2,k] + dfTousTypesJours_ligne[i,k]
+ } else if ( unname(groupes.cah)[i]==3 ){
+    s3 <- s3 + 1
+    for (k in 1:96)
+      new_df[3,k] = new_df[3,k] + dfTousTypesJours_ligne[i,k]
+ } 
+for (i in 1:53) 
+  new_df[1,i] = new_df[1,i] / s1
+  new_df[2,i] = new_df[2,i] / s2
+  new_df[3,i] = new_df[3,i] / s3
+```
+
+```{r}
+new_df3 <-  data.frame( nb= rep(0, times=288) , cluster= rep(0, times=288), heure = rep(seq(1:96), times=3)) 
+
+for (i in 1:96){
+  new_df3[i,1]  <-   new_df["cluster1",i]
+  new_df3[i,2]  =   1
+}
+for (i in 97:192){
+  new_df3[i,1]  <-   new_df["cluster2",i-96]
+  new_df3[i,2]  <-   2
+}
+for (i in 193:288){
+  new_df3[i,1]  <-   new_df["cluster3",i-192]
+  new_df3[i,2]  <-   3
+}
+
+ggplot(new_df3, aes(x= heure, y= nb, colour=cluster ))  + ggtitle("Moyennes de trajets/h suivant les clusters") + geom_point()
+```
+
+
+
+
+
+
+
