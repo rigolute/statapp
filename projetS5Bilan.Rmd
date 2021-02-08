@@ -80,27 +80,32 @@ On divise l'analyse en 4 parties :
 ```{r echo=FALSE}
 dfTypeJour1 = subset.data.frame(df,df$TYPEJOUR == "Dimanche" | df$FERIE == 1)[,c("ARRET","HORAIRE")]
 dfTypeJour1$HORAIRE = hour(dfTypeJour1$HORAIRE)
-dfTypeJour1 = dfTypeJour1 %>% count(c("ARRET", "HORAIRE"))
+dfTypeJour1 = dfTypeJour1 %>% count(ARRET, HORAIRE)
+nbJoursType1 = length(unique(subset.data.frame(df,df$TYPEJOUR == "Dimanche" | df$FERIE == 1)$DAY))
 ```
+
 
 ```{r echo=FALSE}
 dfTypeJour2 = subset.data.frame(df,df$TYPEJOUR == "Samedi" & df$FERIE == 0)[,c("ARRET","HORAIRE")]
 dfTypeJour2$HORAIRE = hour(dfTypeJour2$HORAIRE)
-dfTypeJour2 = dfTypeJour2 %>% count(c("ARRET", "HORAIRE"))
+dfTypeJour2 = dfTypeJour2 %>% count(ARRET,HORAIRE)
+nbJoursType2 = length(unique(subset.data.frame(df,df$TYPEJOUR == "Samedi" & df$FERIE == 0)$DAY))
 ```
 
 
 ```{r echo=FALSE}
 dfTypeJour3 = subset.data.frame(df,df$TYPEJOUR %in% c("Lundi","Mardi","Mercredi","Jeudi","Vendredi") & df$FERIE == 0 & df$SCOLAIRE == 1)[,c("ARRET","HORAIRE")]
 dfTypeJour3$HORAIRE = hour(dfTypeJour3$HORAIRE)
-dfTypeJour3 = dfTypeJour3 %>% count(c("ARRET", "HORAIRE"))
+dfTypeJour3 = dfTypeJour3 %>% count(ARRET,HORAIRE)
+nbJoursType3 = length(unique(subset.data.frame(df,df$TYPEJOUR %in% c("Lundi","Mardi","Mercredi","Jeudi","Vendredi") & df$FERIE == 0 & df$SCOLAIRE == 1)$DAY))
 ```
 
 
 ```{r echo=FALSE}
 dfTypeJour4 = subset.data.frame(df,df$TYPEJOUR %in% c("Lundi","Mardi","Mercredi","Jeudi","Vendredi") & df$FERIE == 0 & df$SCOLAIRE == 0)[,c("ARRET","HORAIRE")]
 dfTypeJour4$HORAIRE = hour(dfTypeJour4$HORAIRE)
-dfTypeJour4 = dfTypeJour4 %>% count(c("ARRET", "HORAIRE"))
+dfTypeJour4 = dfTypeJour4 %>% count(ARRET,HORAIRE)
+nbJoursType4 = length(unique(subset.data.frame(df,df$TYPEJOUR %in% c("Lundi","Mardi","Mercredi","Jeudi","Vendredi") & df$FERIE == 0 & df$SCOLAIRE == 0)$DAY))
 ```
 
 
@@ -108,6 +113,20 @@ Listons les arrêts et heures à considérer :
 ```{r echo=FALSE}
 labels = StatsArrets$Var1
 heures = c(0,1,seq(5,23))
+```
+
+
+```{r echo=FALSE}
+diviseToutesColonnes <- function(df,facteur){
+  for (k in 1:length(df[1,])){
+    df[,k] = df[,k]/facteur
+  }
+  return(df)
+}
+```
+
+```{r echo=FALSE}
+diviseToutesColonnes(data.frame(X=c(2,3),Y=c(4,5)),10)
 ```
 
 Pour mettre à l'échelle entre 0 et 1 :
@@ -127,7 +146,7 @@ On crée des tableaux de données dfi normalisés qui contiennent les fréquenta
 df1 = data.frame(matrix(0, ncol = 24, nrow = 930))
 rownames(df1) <- labels
 for (k in 1:length(dfTypeJour1[,1])){
-  df1[c(dfTypeJour1$ARRET[k]),dfTypeJour1$HORAIRE[k]+1]=dfTypeJour1$freq[k]
+  df1[c(dfTypeJour1$ARRET[k]),dfTypeJour1$HORAIRE[k]+1]=dfTypeJour1$n[k]
 }
 dfTypeJour1 = df1
 df1 <- echelle(df1)
@@ -136,7 +155,7 @@ df1 = df1[ , colSums(is.na(df1)) < nrow(df1)]
 df2 = data.frame(matrix(0, ncol = 24, nrow = 930))
 rownames(df2) <- labels
 for (k in 1:length(dfTypeJour2[,1])){
-  df2[c(dfTypeJour2$ARRET[k]),dfTypeJour2$HORAIRE[k]+1]=dfTypeJour2$freq[k]
+  df2[c(dfTypeJour2$ARRET[k]),dfTypeJour2$HORAIRE[k]+1]=dfTypeJour2$n[k]
 }
 dfTypeJour2 = df2
 df2 <- echelle(df2)
@@ -145,7 +164,7 @@ df2 = df2[ , colSums(is.na(df2)) < nrow(df2)]
 df3 = data.frame(matrix(0, ncol = 24, nrow = 930))
 rownames(df3) <- labels
 for (k in 1:length(dfTypeJour3[,1])){
-  df3[c(dfTypeJour3$ARRET[k]),dfTypeJour3$HORAIRE[k]+1]=dfTypeJour3$freq[k]
+  df3[c(dfTypeJour3$ARRET[k]),dfTypeJour3$HORAIRE[k]+1]=dfTypeJour3$n[k]
 }
 dfTypeJour3 = df3
 df3 <- echelle(df3)
@@ -154,7 +173,7 @@ df3 = df3[ , colSums(is.na(df3)) < nrow(df3)]
 df4 = data.frame(matrix(0, ncol = 24, nrow = 930))
 rownames(df4) <- labels
 for (k in 1:length(dfTypeJour4[,1])){
-  df4[c(dfTypeJour4$ARRET[k]),dfTypeJour4$HORAIRE[k]+1]=dfTypeJour4$freq[k]
+  df4[c(dfTypeJour4$ARRET[k]),dfTypeJour4$HORAIRE[k]+1]=dfTypeJour4$n[k]
 }
 dfTypeJour4 = df4
 df4 <- echelle(df4)
@@ -233,7 +252,7 @@ dfSilhouettes <- dfSilhouettes %>%
 
 ggplot(dfSilhouettes,aes(x = k, y = value)) + 
   geom_line(aes(color = variable)) + 
-  scale_color_manual(values = c("#BD33A4", "steelblue","#16B84E"))+theme_bw()
+  scale_color_manual(values = c("#BD33A4", "steelblue","#16B84E"))+theme_bw()#c("#BD33A4", "steelblue","#16B84E"))
 ```
 Conclusion : on retient la distance de Manhattan et k = 4.
 
@@ -251,10 +270,10 @@ plot(resManhattan,points = TRUE,number = FALSE,hull = TRUE)
 
 Représentation des trajets/h en moyenne pour chaque cluster suivant le type de jour (GR1 de 0 à 23, GR2 de 24 à 48...) :
 ```{r echo=FALSE}
-dfTousTypesJours = cbind(dfTypeJour1,dfTypeJour2,dfTypeJour3,dfTypeJour4)
+dfTousTypesJours = cbind(diviseToutesColonnes(dfTypeJour1,nbJoursType1),diviseToutesColonnes(dfTypeJour2,nbJoursType2),diviseToutesColonnes(dfTypeJour3,nbJoursType3),diviseToutesColonnes(dfTypeJour4,nbJoursType4))
 dfclusteringTousTypesJours = data.frame(ARRET = labels, GR =resManhattan@cluster )
 ggplot(data.frame(t= seq(0,95),Y1=colMeans(data.frame(dfTousTypesJours)[labels %in% dfclusteringTousTypesJours[dfclusteringTousTypesJours$GR == 1,]$ARRET,]),Y2=colMeans(data.frame(dfTousTypesJours)[labels %in% dfclusteringTousTypesJours[dfclusteringTousTypesJours$GR == 2,]$ARRET,]),Y3=colMeans(data.frame(dfTousTypesJours)[labels %in% dfclusteringTousTypesJours[dfclusteringTousTypesJours$GR == 3,]$ARRET,]),Y4=colMeans(data.frame(dfTousTypesJours)[labels %in% dfclusteringTousTypesJours[dfclusteringTousTypesJours$GR == 4,]$ARRET,])),aes(x = t, y = value)) + 
-                    geom_line(aes(y=Y1),color="black")+geom_line(aes(y=Y2),color="#87E990")+geom_line(aes(y=Y3),color="#CF0A1D")+geom_line(aes(y=Y4),color="#048B9A")+ggtitle("Moyennes de trajets/h suivant les clusters")
+                    geom_line(aes(y=Y1),color="#048B9A")+geom_line(aes(y=Y2),color="black")+geom_line(aes(y=Y3),color="#87E990")+geom_line(aes(y=Y4),color="#CF0A1D")+ggtitle("Moyennes des trajets/h suivant les clusters")
 
 ```
 
@@ -352,7 +371,7 @@ df_cumsum <- ddply(dfLieuxPresGR, "Groupe",
 
 ggplot(data=df_cumsum, aes(x=Groupe, y=Proportion, fill=Lieu)) +
   geom_bar(stat="identity")+
-  scale_fill_brewer(palette="Set2")+
+  scale_fill_brewer(palette="Dark2")+
   theme_minimal()+ggtitle(paste("Groupe",GR))
 }
 
