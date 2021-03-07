@@ -1,0 +1,319 @@
+---
+title: "ProjetS6_Imane"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r echo=FALSE}
+library(plyr)
+library(dplyr)
+library(magrittr)
+library(lubridate)
+library(ggplot2)
+library(tidyverse)
+library(sf)
+library(caret)
+library(class)
+library(factoextra)
+library(ggmap)
+library(osmdata)
+library(geosphere)
+library(grid)
+library(lattice)
+library(modeltools)
+library(stats4)
+library(flexclust)
+library(keras)
+library(MASS)
+library(DAAG)
+```
+
+```{r}
+#  pour avoir un df comme dfclusteringTousTypesJours
+dfClusteringLignes <- data.frame(groupes.cah)
+dfClusteringLignes <- cbind(X = rownames(dfClusteringLignes), dfClusteringLignes)
+rownames(dfClusteringLignes) <- 1:nrow(dfClusteringLignes)
+dfClusteringLignes$LIGNE <- dfClusteringLignes$X
+names(dfClusteringLignes)[names(dfClusteringLignes) == "groupes.cah"] <- "GR"
+```
+
+```{r echo=FALSE}
+write.csv(dfClusteringLignes,"./dfClusteringLignes.csv")
+```
+
+
+```{r}
+#labels_ligne <- read.csv("./labels_lignes.csv", header = TRUE, sep= ",", na.strings = "")
+#labels_ligne$X <- NULL 
+#names(labels_ligne)[names(labels_ligne) == "x"] <- "LIGNE"
+```
+
+# 1°) Préparation des données pour la régression
+
+```{r echo=FALSE}
+rm(list=setdiff(ls(), c("mad_map","df","dfclusteringTousTypesJours","labels", "labels_ligne", "groupes.cah" )))
+```
+
+```{r echo=FALSE}
+# On indice tous les dataframes et variables par "_l" pour "ligne"
+dfPourACP_l = df[,c("DAY", "LIGNE", "HEURE")]
+dfPourACP_l = dfPourACP_l %>% count(c("DAY", "LIGNE", "HEURE"))
+```
+
+On charge les données de pluie.
+```{r echo=FALSE}
+dfMeteo <- read.csv("./export-toulon2019.csv", header = TRUE, sep= ";", na.strings = "")
+dfMeteo$DATE = date(dfMeteo$DATE)
+dfMeteo = dfMeteo[,c(1,8)]
+```
+
+```{r echo=FALSE}
+# ajout des variables DATE, TYPEJOUR (lundi, mardi...), PRECIPITATIONS_MM, HEURE
+dfPourACP2_l = merge(data.frame(DATE = seq(as.Date("2019-01-01"), by = "day", length.out = 365),TYPEJOUR = weekdays(seq(as_datetime("2019-01-01"), by = "day", length.out = 365)),PRECIPITATIONS_MM = dfMeteo$PRECIP_TOTAL_DAY_MM),data.frame(HEURE = c(0,1,2,seq(5,23))))
+
+# ajout des lignes
+dfPourACP2_l = merge(dfPourACP2_l, data.frame(LIGNE=labels_ligne) )
+
+```
+
+On crée une liste avec les jours de vacances.
+```{r}
+vacances = seq(as.Date("2019-01-01"), by = "day", length.out = 6)
+vacances = c(vacances,seq(as.Date("2019-02-09"), by = "day", length.out = 16))
+vacances = c(vacances,seq(as.Date("2019-04-06"), by = "day", length.out = 17))
+vacances = c(vacances,seq(as.Date("2019-05-29"), by = "day", length.out = 5))
+vacances = c(vacances,seq(as.Date("2019-07-06"), by = "day", length.out = 58))
+vacances = c(vacances,seq(as.Date("2019-10-19"), by = "day", length.out = 16))
+vacances = c(vacances,seq(as.Date("2019-12-21"), by = "day", length.out = 11))
+```
+
+```{r echo=FALSE}
+# ajout de la variable VACANCES et de la variable FERIE
+dfPourACP2_l = merge(dfPourACP2_l,data.frame(DATE = c(as.Date("2019-01-01"),as.Date("2019-04-21"),as.Date("2019-04-22"),as.Date("2019-05-01"),as.Date("2019-05-08"),as.Date("2019-05-30"),as.Date("2019-06-09"),as.Date("2019-06-10"),as.Date("2019-07-14"),as.Date("2019-08-15"),as.Date("2019-11-01"),as.Date("2019-11-11"),as.Date("2019-12-25")),FERIE = seq(1, by =0, length.out = 13)), by.x = c("DATE"), by.y = c("DATE"),all=TRUE)
+dfPourACP2_l = merge(dfPourACP2_l,data.frame(DATE = vacances, VACANCES = seq(1, by =0, length.out = length(vacances))), by.x = c("DATE"), by.y = c("DATE"),all=TRUE)
+```
+
+On rajoute ensuite le décompte des validations au tableau final. Pour cela, on le prélève du tableau dfPourACP. 
+```{r echo=FALSE}
+dfPourACP2_l$HEURE = paste(dfPourACP2_l$HEURE)
+```
+
+```{r echo=FALSE}
+dfPourACP_l$HEURE = paste(as.integer(dfPourACP_l$HEURE))
+dfPourACP2_l$LIGNE = paste(dfPourACP2_l$LIGNE)
+```
+
+```{r echo=FALSE}
+dfPourACP2_l = merge(dfPourACP2_l,dfPourACP_l[,c(1,2,3,4)],by.x = c("DATE","HEURE","LIGNE"),by.y = c("DAY","HEURE","LIGNE"),all=TRUE)
+```
+
+```{r echo=FALSE}
+dfPourACP2_l[is.na(dfPourACP2_l)] <- 0
+```
+
+On divise le tableau de données pour la régression en 4 afin d'en avoir 1 nouveau par cluster.
+```{r echo=FALSE}
+dfCluster1_l = dfPourACP2_l[ dfPourACP2_l$LIGNE %in% names(groupes.cah[unname(groupes.cah)==1]),]
+dfCluster2_l = dfPourACP2_l[ dfPourACP2_l$LIGNE %in% names(groupes.cah[unname(groupes.cah)==2]),]
+dfCluster3_l = dfPourACP2_l[ dfPourACP2_l$LIGNE %in% names(groupes.cah[unname(groupes.cah)==3]),]
+dfCluster4_l = dfPourACP2_l[ dfPourACP2_l$LIGNE %in% names(groupes.cah[unname(groupes.cah)==4]),]
+```
+
+On one-hot encode les jours de la semaine pour pouvoir les analyser comme les autres variables.
+```{r echo=FALSE}
+oneHotEncode <- function(df0){
+  dmy <- dummyVars(" ~ .", data = df0)
+  return(data.frame(predict(dmy, newdata = df0)))
+}
+```
+
+Pour standardiser la variable de précipitations :
+```{r echo=FALSE}
+standardise <- function(df0,colonne){
+  maxCol = max(df0[,c(colonne)])
+  minCol = min(df0[,c(colonne)])
+  df0[,c(colonne)]= (df0[,c(colonne)]- minCol)/(maxCol-minCol)
+}
+```
+
+One-hot encoding + standardisation.
+```{r echo=FALSE}
+prepare_dfCluster <- function(df0, colonne){
+  print(mean(df0$freq))
+  df0 = df0[,-c(1,3)]#on tire la variable date et l'arrêt
+  print(mean(df0$freq))
+  df0 = oneHotEncode(df0)
+  print(mean(df0$freq))
+  standardise(df0,colonne)
+  print(mean(df0$freq))
+  return(df0)
+}
+```
+
+Préparation des tableaux pour la régression (one-hot encoding + standardisation)
+```{r echo=FALSE}
+dfCluster1_l = prepare_dfCluster(dfCluster1_l, "PRECIPITATIONS_MM")
+dfCluster2_l = prepare_dfCluster(dfCluster2_l, "PRECIPITATIONS_MM")
+dfCluster3_l = prepare_dfCluster(dfCluster3_l, "PRECIPITATIONS_MM")
+dfCluster4_l = prepare_dfCluster(dfCluster4_l, "PRECIPITATIONS_MM")
+```
+
+rmse
+```{r echo=FALSE}
+rmse <- function(y,ypred)
+{
+    sqrt(mean((y-ypred)^2))
+}
+```
+
+mae
+```{r echo=FALSE}
+mae <- function(y,ypred)
+{
+    mean(abs(y-ypred))
+}
+```
+
+Fonction pour créer une variable HEURE à partir des 22 précédentes et une variable JOURS à la place des 7 précédentes (jours de la semaine). On fait cela par LDA pour que ce soit supervisé ce qui semble être un avantage par rapport à la PCA. Le tableau obtenu est retourné.
+```{r echo=FALSE}
+reductionDimensionParLDA <- function(df0){
+  ldamodel = lda(n~., data=df0[c(seq(24,29),33)])
+  JOURS = as.matrix(df0[seq(24,29)])%*%as.matrix(ldamodel$scaling[,1])
+  ldamodel = lda(n~., data=df0[c(seq(1,12),seq(14,22),33)])
+  HEURES = as.matrix(df0[c(seq(1,12),seq(14,22))])%*%as.matrix(ldamodel$scaling[,1])
+  return(data.frame(JOURS = JOURS, HEURES = HEURES, FERIE = df0$FERIE, VACANCES = df0$VACANCES, PRECIPITATIONS = df0$PRECIPITATIONS_MM,n = df0$freq))
+}
+```
+
+Fonction qui applique cette fois la lda à tout le jeu de données pour en retirer 5 composantes explicatives. On retourne le tableau final obtenu.
+```{r echo=FALSE}
+reductionDimensionParLDA2 <- function(df0){
+  ldamodel = lda(n~., data=df0[c(seq(1,12), seq(14,33))])
+  LDA1 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,1])
+  LDA2 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,2])
+  LDA3 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,3])
+  LDA4 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,4])
+  LDA5 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,5])
+  return(data.frame(LDA1 = LDA1, LDA2 = LDA2,LDA3 = LDA3,LDA4 = LDA4,LDA5 = LDA5,n = df0$freq))
+}
+```
+
+# 2°) Régression multiple
+
+
+```{r}
+#Colinéarité
+dfCluster2_l$TYPEJOURDimanche <- NULL
+dfCluster2_l$HEURE2 <- NULL
+```
+
+```{r echo=FALSE}
+set.seed(2021)
+Trainingindex_l<-createDataPartition(dfCluster2_l$freq, p=0.8, list=FALSE) 
+trainingset_l<-dfCluster2_l[Trainingindex_l,] 
+testingset_l<-dfCluster2_l[-Trainingindex_l,] 
+```
+
+```{r}
+reg.mul <- lm(freq~., data=trainingset_l)
+```
+
+```{r}
+summary(reg.mul)
+```
+
+```{r}
+library(leaps)
+choix <- regsubsets(freq~.,data=trainingset_l,nbest=1,nvmax=25)
+plot(choix,scale="bic")
+```
+```{r}
+reg.fin <- lm(freq~. ,data=trainingset_l[,-c(1,2,14,15,16)])
+summary(reg.fin)
+```
+
+
+```{r}
+#reg.fin <- lm(n~ HEURE10+HEURE11+HEURE13+HEURE14+HEURE16+HEURE17+HEURE8+TYPEJOURJeudi+TYPEJOURLundi+TYPEJOURMardi+TYPEJOURMercredi+TYPEJOURSamedi+TYPEJOURVendredi+VACANCES,data=trainingset_l)
+#summary(reg.fin)
+```
+
+
+```{r}
+#predict(reg.fin,testingset_l[,-31],interval="pred")
+```
+
+
+```{r}
+yvsypred_l = data.frame(yreel = testingset_l$freq,  X1 = abs(round(predict(reg.fin, testingset_l, type = "response"),digit=0)))
+names(yvsypred_l)[names(yvsypred_l)=="X1"] <- "ypred"
+
+ggplot(yvsypred_l,aes(x = yreel, y = value)) + 
+                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+
+  
+ggtitle("Résultats MCO sur  test: y prédit en fonction de y réel")
+```
+
+# Régression ridge
+
+```{r}
+library(glmnet)
+ridge <- glmnet(as.matrix(trainingset_l[,1:30]),trainingset_l[,31],family="poisson", alpha=0)
+```
+
+```{r}
+mdlY <- trainingset_l$freq
+mdlX <- as.matrix(trainingset_l[, -c(31)])
+```
+
+```{r}
+cv2 <- cv.glmnet(mdlX, mdlY, family =  "poisson" , nfold = 20, paralle = TRUE, alpha = 0, trace.it= TRUE)
+```
+
+```{r}
+plot(cv2)
+```
+
+```{r}
+cv1 <- cv.glmnet(mdlX, mdlY, family =  "poisson" , nfold = 10, paralle = TRUE, alpha = 0, trace.it= TRUE, lambda=exp(seq(-5,1,length=100)) )
+```
+
+```{r}
+plot(cv1)
+```
+```{r}
+cv1$lambda.1se
+cv1$lambda.min
+```
+
+```{r}
+newY <- testingset_l$freq
+newX <- as.matrix( testingset_l[, -c(31)] )
+```
+
+```{r}
+ridge <- glmnet(mdlX, mdlY, family ="poisson" , lambda = cv2$lambda.1se, alpha = 0, trace.it = TRUE)
+```
+
+```{r}
+prev.class.ridge <- predict(ridge, newX, type="response")
+```
+
+```{r}
+yvsypred = data.frame(yreel = newY,  X1 = round(predict(ridge, newX, type = "response"),digit=0))
+names(yvsypred)[names(yvsypred)=="s0"] <- "ypred"
+ggplot(yvsypred,aes(x = yreel, y = value)) + 
+                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+
+ggtitle("")
+```
+```{r}
+ridge_cv1 <- glmnet(mdlX, mdlY, family ="poisson" , lambda = cv1$lambda.1se, alpha = 0, trace.it = TRUE)
+```
+
+
+
+
