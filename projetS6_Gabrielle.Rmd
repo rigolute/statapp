@@ -1,0 +1,442 @@
+---
+title: "projetS6"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r echo=FALSE}
+library(plyr)
+library(dplyr)
+library(magrittr)
+library(lubridate)
+library(ggplot2)
+library(tidyverse)
+library(sf)
+library(caret)
+library(class)
+library(factoextra)
+library(ggmap)
+library(osmdata)
+library(geosphere)
+library(grid)
+library(lattice)
+library(modeltools)
+library(stats4)
+library(flexclust)
+library(keras)
+library(MASS)
+pkgs <- list("glmnet", "doParallel", "foreach", "pROC")
+lapply(pkgs, require, character.only = T)
+registerDoParallel(cores = 4)
+```
+
+On tire les variables créées précédemment sauf quelques unes. Comme ça on laisse plus d'espace dans l'environnement.
+```{r echo=FALSE}
+rm(list=setdiff(ls(), c("mad_map","df","dfclusteringTousTypesJours","labels")))
+```
+
+```{r echo=FALSE}
+write.csv(df,"./df.csv")
+```
+
+# 1°) Préparation des données pour la régression
+
+On crée un tableau qui contient le nombre de validations par créneau horaire, par arrêt et par jour (quand il y en a ie. qu'on a aucune observation avec 0 validation).
+```{r echo=FALSE}
+dfPourACP = df[,c("DATE","ARRET","HEURE")]
+dfPourACP = dfPourACP %>% count(DATE,ARRET, HEURE)
+```
+
+On charge les données de pluie.
+```{r echo=FALSE}
+dfMeteo <- read.csv("./données météo/export-toulon2019.csv", header = TRUE, sep= ";", na.strings = "")
+dfMeteo$DATE = date(dfMeteo$DATE)
+dfMeteo = dfMeteo[,c(1,8)]
+```
+
+On crée une liste avec les jours de vacances
+```{r}
+vacances = seq(as.Date("2019-01-01"), by = "day", length.out = 6)
+vacances = c(vacances,seq(as.Date("2019-02-09"), by = "day", length.out = 16))
+vacances = c(vacances,seq(as.Date("2019-04-06"), by = "day", length.out = 17))
+vacances = c(vacances,seq(as.Date("2019-05-29"), by = "day", length.out = 5))
+vacances = c(vacances,seq(as.Date("2019-07-06"), by = "day", length.out = 58))
+vacances = c(vacances,seq(as.Date("2019-10-19"), by = "day", length.out = 16))
+vacances = c(vacances,seq(as.Date("2019-12-21"), by = "day", length.out = 11))
+```
+
+On crée le tableau complet comme dfPourACP mais avec tous les blocs horaires, quotidiennement et pour tous les arrêts. En tout, on a 22 (: nb d'heures sans compter 2h et 3h) * 365 (jours de l'année) * 930 (nb arrêts) = 7467900 lignes dans le tableau. Cela revient à ajouter les observations quand il n'y a pas de validation.
+```{r echo=FALSE}
+# ajout des variables DATE, TYPEJOUR (lundi, mardi...), PRECIPITATIONS_MM, HEURE
+dfPourACP2 = merge(data.frame(DATE = seq(as.Date("2019-01-01"), by = "day", length.out = 365),TYPEJOUR = weekdays(seq(as_datetime("2019-01-01"), by = "day", length.out = 365)),PRECIPITATIONS_MM = dfMeteo$PRECIP_TOTAL_DAY_MM),data.frame(HEURE = c(0,1,2,seq(5,23))))
+
+# ajout des arrêts
+dfPourACP2 = merge(dfPourACP2,data.frame(ARRET=labels))
+
+# ajout de la variable ECOLE et de la variable ORDINAIRE
+dfPourACP2 = merge(dfPourACP2,data.frame(DATE = c(as.Date("2019-01-01"),as.Date("2019-04-21"),as.Date("2019-04-22"),as.Date("2019-05-01"),as.Date("2019-05-08"),as.Date("2019-05-30"),as.Date("2019-06-09"),as.Date("2019-06-10"),as.Date("2019-07-14"),as.Date("2019-08-15"),as.Date("2019-11-01"),as.Date("2019-11-11"),as.Date("2019-12-25")),ORDINAIRE = seq(0, by =0, length.out = 13)), by.x = c("DATE"), by.y = c("DATE"),all=TRUE)
+dfPourACP2 = merge(dfPourACP2,data.frame(DATE = vacances, ECOLE = seq(0, by =0, length.out = length(vacances))), by.x = c("DATE"), by.y = c("DATE"),all=TRUE)
+```
+
+
+On rajoute ensuite le décompte des validations au tableau final. Pour cela, on le prélève du tableau dfPourACP. 
+```{r echo=FALSE}
+dfPourACP2$HEURE = paste(dfPourACP2$HEURE)
+dfPourACP$HEURE = paste(as.integer(dfPourACP$HEURE))
+dfPourACP2$ARRET = paste(dfPourACP2$ARRET)
+dfPourACP2 = merge(dfPourACP2,dfPourACP,by.x = c("DATE","HEURE","ARRET"),by.y = c("DATE","HEURE","ARRET"),all=TRUE)
+dfPourACP2$n[is.na(dfPourACP2$n)] <- 0
+dfPourACP2$ECOLE[is.na(dfPourACP2$ECOLE)] <- 1
+dfPourACP2$ORDINAIRE[is.na(dfPourACP2$ORDINAIRE)] <- 1
+
+```
+
+
+
+
+On one-hot encode les jours de la semaine pour pouvoir les analyser comme les autres variables.
+```{r echo=FALSE}
+oneHotEncode <- function(df0){
+  dmy <- dummyVars(" ~ .", data = df0)
+  return(data.frame(predict(dmy, newdata = df0)))
+}
+```
+
+Pour standardiser la variable de précipitations :
+```{r echo=FALSE}
+standardise <- function(df0,colonne){
+  maxCol = max(df0[,c(colonne)])
+  minCol = min(df0[,c(colonne)])
+  df0[,c(colonne)]= (df0[,c(colonne)]- minCol)/(maxCol-minCol)
+}
+```
+
+One-hot encoding + standardisation.
+```{r echo=FALSE}
+prepare_dfCluster <- function(df0, colonne){
+  df0 = df0[,-c(1,3)]#on tire la variable date et l'arrêt
+  df0 = oneHotEncode(df0)
+  standardise(df0,colonne)
+  return(df0)
+}
+```
+
+
+
+
+
+
+
+
+Fonction pour créer une variable HEURE à partir des 22 précédentes et une variable JOURS à la place des 7 précédentes (jours de la semaine). On fait cela par LDA pour que ce soit supervisé ce qui semble être un avantage par rapport à la PCA. Le tableau obtenu est retourné.
+```{r echo=FALSE}
+reductionDimensionParLDA <- function(df0, dftest){
+  ldamodel = lda(n~., data=df0[c(seq(24,29),33)])
+  JOURS0 = as.matrix(df0[seq(24,29)])%*%as.matrix(ldamodel$scaling[,1])
+  JOURStest = as.matrix(dftest[seq(24,29)])%*%as.matrix(ldamodel$scaling[,1])
+  ldamodel = lda(n~., data=df0[c(seq(1,12),seq(14,22),33)])
+  HEURES0 = as.matrix(df0[c(seq(1,12),seq(14,22))])%*%as.matrix(ldamodel$scaling[,1])
+  HEUREStest = as.matrix(dftest[c(seq(1,12),seq(14,22))])%*%as.matrix(ldamodel$scaling[,1])
+  return(list(data.frame(JOURS = JOURS0, HEURES = HEURES0, ORDINAIRE = df0$ORDINAIRE, ECOLE = df0$ECOLE, PRECIPITATIONS = df0$PRECIPITATIONS_MM,n = df0$n, EVENEMENT = df0$EVENEMENT), data.frame(JOURS = JOURStest, HEURES = HEUREStest, ORDINAIRE = dftest$ORDINAIRE, ECOLE = dftest$ECOLE, PRECIPITATIONS = dftest$PRECIPITATIONS_MM,n = dftest$n, EVENEMENT = dftest$EVENEMENT)))
+}
+```
+
+Fonction qui applique cette fois la lda à tout le jeu de données pour en retirer 5 composantes explicatives. On retourne le tableau final obtenu.
+```{r echo=FALSE}
+reductionDimensionParLDA2 <- function(df0){
+  ldamodel = lda(n~., data=df0[c(seq(1,12), seq(14,33))])
+  LDA1 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,1])
+  LDA2 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,2])
+  LDA3 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,3])
+  LDA4 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,4])
+  LDA5 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,5])
+  return(data.frame(LDA1 = LDA1, LDA2 = LDA2,LDA3 = LDA3,LDA4 = LDA4,LDA5 = LDA5,n = df0$n))
+}
+```
+
+3 possibilités pour la réduction : choisir la préférée entre LDA (sur heure et jours), LDA2 (sur toutes les variables) ou rien
+
+
+
+
+# 2°) Régressions
+
+Essai d'inférence d'évènements pour rajouter une variable. Rque : après il ne faudra mettre calucler ça qu'à partir du train (comme le clustering d'ailleurs.)
+```{r echo=FALSE}
+ajoutInferenceEvenements <- function(df0){
+  freqJours = df0[,c("DATE","n")]
+  freqJours = aggregate(freqJours$n, by=list(Category=freqJours$DATE), FUN=sum)
+  moyDistrib = mean(freqJours$x)
+  sigmaDistrib = sqrt(var(freqJours$x))
+  evenement = seq(0,by=0, length.out = 365)
+  for (k in seq(1,by=0.02,length.out = 20)){
+    evenement[freqJours$x>moyDistrib+k*sigmaDistrib] = k
+    evenement[freqJours$x<moyDistrib-k*sigmaDistrib] = -k
+  }
+  
+  df0 = merge(df0,data.frame(Category = freqJours$Category,EVENEMENT = evenement), by.x = c("DATE"), by.y = c("Category"), all=TRUE)
+  return(df0)
+}
+```
+
+On divise le tableau de données pour la régression en nb_clusters afin d'en avoir 1 nouveau par cluster. Puis on le prépare (one-hot encoding + standardisation)
+```{r echo=FALSE}
+cree_dfCluster <- function(GR,dfclusteringTousTypesJours){
+  dfCluster = dfPourACP2[dfPourACP2$ARRET %in% dfclusteringTousTypesJours[dfclusteringTousTypesJours$GR == GR,]$ARRET,]
+  
+  
+  dfCluster = ajoutInferenceEvenements(dfCluster)###A VOIR
+  
+  
+  
+  return(prepare_dfCluster(dfCluster, "PRECIPITATIONS_MM"))
+}
+```
+
+Création des jeux de test et d'entraînement+validation
+```{r echo=FALSE}
+creationJeux <- function(GR,dfclusteringTousTypesJours){
+  
+  dfCluster = cree_dfCluster(GR,dfclusteringTousTypesJours)
+  
+  set.seed(2021)
+  Trainingindex<-createDataPartition(dfCluster$n, p=0.8, list=FALSE) 
+  trainingset<-dfCluster[Trainingindex,] 
+  testingset<-dfCluster[-Trainingindex,] 
+  mdlY <- trainingset$n
+  mdlX <- as.matrix(trainingset[,-c(33)])
+  newY <- testingset$n
+  newX <- as.matrix(testingset[,-c(33)])
+  
+  return (list(mdlX,mdlY,newX,newY))
+}
+
+```
+
+```{r echo=FALSE}
+creationJeux(1,dfclusteringTousTypesJours)[[1]]
+```
+
+
+## 2.1°) Régression linéaire classique -> résultats bofs
+```{r echo=FALSE}
+creationJeuPourLM <- function(GR,dfclusteringTousTypesJours){
+  
+  dfCluster = cree_dfCluster(GR,dfclusteringTousTypesJours)
+  
+  set.seed(2021)
+  Trainingindex<-createDataPartition(dfCluster$n, p=0.8, list=FALSE) 
+  trainingset<-dfCluster[Trainingindex,] 
+  testingset<-dfCluster[-Trainingindex,] 
+  
+  return (list(trainingset,testingset))
+}
+```
+
+```{r echo=FALSE}
+library(DAAG)
+```
+
+
+
+```{r echo=FALSE}
+jeu <- creationJeuPourLM(2,dfclusteringTousTypesJours)
+trainingset <- jeu[[1]]
+testingset <- jeu[[2]]
+#nouveaujeu = reductionDimensionParLDA(trainingset,testingset)
+#trainingset = nouveaujeu[[1]]
+#testingset = nouveaujeu[[2]]
+```
+
+```{r echo=FALSE}
+summary(trainingset$EVENEMENT)
+```
+
+```{r echo=FALSE}
+fit0 = lm(n ~ .+0, data=trainingset[,-c(1,2,13,15,16,17,18,19,23,28)] )
+```
+```{r echo=FALSE}
+yvsypred = data.frame(yreel = testingset$n,  X1 = abs(round(predict(fit0, testingset, type = "response"),digit=0)))
+names(yvsypred)[names(yvsypred)=="X1"] <- "ypred"
+ggplot(yvsypred,aes(x = yreel, y = value)) + 
+                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+
+ggtitle("Résultats MCO sur  test: y prédit en fonction de y réel")
+```
+```{r echo=FALSE}
+summary(fit0)
+```
+
+## 2.2°) Modèle linéaire généralisé (GLM)
+
+### 2.2.1°) Régression ridge
+
+Création du modèle. Paramètre family à adapter. Ici on a un output de type "décompte" ("count data"). Ce qui se fait généralement dans ces cas, c'est d'utiliser un modèle de poisson, un modèle quasipoisson, un modèle de hermite, un modèle binomial négatif (ou autre?). -> choix à améliorer ici.
+```{r echo=FALSE}
+modeleDeRegressionRidge <- function(mdlX,mdlY,family){
+  cv2 <- cv.glmnet(mdlX, mdlY, family =  poisson(link = 'identity') , nfold = 20, paralle = TRUE, alpha = 0, trace.it= TRUE)
+  md2 <- glmnet(mdlX, mdlY, family =   poisson(link = 'identity') , lambda = cv2$lambda.1se, alpha = 0, trace.it = TRUE)
+  return (md2)
+}
+```
+
+
+graphe des prédictions par rapport aux valeurs réelles sur le test.
+```{r echo=FALSE}
+grapheRegressionRidge <- function(md2,newY,newX,GR){
+  yvsypred = data.frame(yreel = newY,  X1 = round(predict(md2, newX, type = "response"),digit=0))
+  names(yvsypred)[names(yvsypred)=="s0"] <- "ypred"
+  ggplot(yvsypred,aes(x = yreel, y = value)) + 
+                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+
+  ggtitle("")
+  ggsave(paste("./regressionRidgeLinearLink",GR,".png"))
+}
+
+```
+
+Fonction qui enregistre le graphe ypred = f(yreel) sur le test et qui affiche deviance, mse et mae.
+```{r echo=FALSE}
+resultatRegressionRidge <- function(mdlX,mdlY,newX, newY,famille,GR){
+  md2 = modeleDeRegressionRidge(mdlX,mdlY,famille)
+  print(assess.glmnet(md2, newy=newY,newx = newX))
+  grapheRegressionRidge(md2,newY,newX,GR)
+}
+```
+
+Utilise le numéro du cluster et le tableau des couples arrêt-cluster et affiche/enregistre les résultats de la régression ridge (graphe, deviance, mae, mse)
+```{r echo=FALSE}
+regresse <- function(GR,dfclusteringTousTypesJours){
+  jeux = creationJeux(GR,dfclusteringTousTypesJours)
+  resultatRegressionRidge(jeux[[1]],jeux[[2]],jeux[[3]],jeux[[4]],"poisson",GR)
+}
+```
+
+Application
+```{r echo=FALSE}
+regresse(2,dfclusteringTousTypesJours)
+```
+```{r echo=FALSE}
+regresse(1,dfclusteringTousTypesJours15)
+```
+
+```{r echo=FALSE}
+for (k in 1:15){
+  print(k)
+  regresse(k,dfclusteringTousTypesJours15)
+}
+```
+
+### 2.2.2°) Régression elasticnet
+modèle (family reste encore à adapter, type.measure aussi ?)
+```{r echo=FALSE}
+modeleDeRegressionElasticnet <- function(mdlX,mdlY,family){
+  a <- seq(0.1, 0.9, 0.05)
+search <- foreach(i = a, .combine = rbind) %dopar% {
+  cv <- cv.glmnet(mdlX, mdlY, family = family, nfold = 10,  paralle = TRUE, alpha = i)
+  data.frame(cvm = cv$cvm[cv$lambda == cv$lambda.1se], lambda.1se = cv$lambda.1se, alpha = i)
+  }
+  cv3 <- search[search$cvm == min(search$cvm), ]
+  md3 <- glmnet(mdlX, mdlY, family = family, lambda = cv3$lambda.1se, alpha = cv3$alpha)
+  return(md3)
+}
+
+```
+
+graphe des prédictions par rapport aux valeurs réelles sur le test.
+```{r echo=FALSE}
+grapheRegressionElasticnet <- function(md2,newY,newX,GR){
+  yvsypred = data.frame(yreel = newY,  X1 = predict(md2, newX, type = "response"))
+  names(yvsypred)[names(yvsypred)=="s0"] <- "ypred"
+  ggplot(yvsypred,aes(x = yreel, y = value)) + 
+                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+
+  ggtitle("")
+  ggsave(paste("./regressionElasticnet",GR,".png"))
+}
+
+```
+
+```{r echo=FALSE}
+resultatRegressionElasticnet <- function(mdlX,mdlY,newX, newY,famille,GR){
+  md3 = modeleDeRegressionElasticnet(mdlX,mdlY,famille)
+  print(assess.glmnet(md3, newy=newY,newx = newX))
+  grapheRegressionElasticnet(md3,newY,newX,GR)
+}
+```
+
+Utilise le numéro du cluster et le tableau des couples arrêt-cluster et affiche/enregistre les résultats de la régression elasticnet (graphe, deviance, mae, mse)
+```{r echo=FALSE}
+regresseElasticnet <- function(GR,dfclusteringTousTypesJours){
+  jeux = creationJeux(GR,dfclusteringTousTypesJours)
+  resultatRegressionElasticnet(jeux[[1]],jeux[[2]],jeux[[3]],jeux[[4]],"poisson",GR)
+}
+```
+
+Application
+```{r echo=FALSE}
+regresseElasticnet(1,dfclusteringTousTypesJours)
+```
+
+### 2.3°) Régression de Hermite
+
+```{r echo=FALSE}
+library(hermite)
+```
+
+```{r echo=FALSE}
+modelHermite = glm.hermite(n ~ ., 
+                    data = trainingset, 
+                    link = "log", 
+                    m=NULL)
+```
+
+```{r echo=FALSE}
+summary(model)
+```
+
+
+# 3°) Conclusion
+
+Marche moyennement
+Sources d'améliorations envisageables : 
+- concernant le modèle : changer le paramètre "family", rajouter un paramètre "weight", changer le paramètre "type.measure" qui est à "deviance" par défaut.
+- concernant les features : trouver comment mieux les sélectionner
+- concernant le clustering : peut-être faut-il augmenter le nombre de cluster pour avoir plus d'homogénéité dans les clusters
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Lasso
+# ```{r echo=FALSE}
+# cv1 <- cv.glmnet(mdlX, mdlY, family = "poisson", nfold = 10,  paralle = TRUE, alpha = 1)
+# md1 <- glmnet(mdlX, mdlY, family = "poisson", lambda = cv1$lambda.1se, alpha = 1)
+# coef(md1)
+# ```
+
+# ```{r echo=FALSE}
+# rmse(newY, round(predict(md1, newX, type = "response"),digits = 0))
+# ```
+# ```{r echo=FALSE}
+# mae(newY, round(predict(md1, newX, type = "response"),digits = 0))
+# ```
+
+# ```{r echo=FALSE}
+# yvsypred = data.frame(yreel = newY,  X1 = round(predict(md1, newX, type = "response"),digits=0))
+# names(yvsypred)[names(yvsypred)=="s0"] <- "ypred"
+# ggplot(yvsypred,aes(x = yreel, y = ypred)) + 
+#                     geom_point(aes(y=ypred),color="#048B9A",size=0.1)+
+#   ggtitle("")
+# ```
