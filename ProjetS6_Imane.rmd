@@ -222,9 +222,6 @@ testingset_l<-dfCluster2_l[-Trainingindex_l,]
 reg.mul <- lm(freq~., data=trainingset_l)
 ```
 
-```{r}
-summary(reg.mul)
-```
 
 ```{r}
 library(leaps)
@@ -236,24 +233,12 @@ reg.fin <- lm(freq~. ,data=trainingset_l[,-c(1,2,14,15,16)])
 summary(reg.fin)
 ```
 
-
-```{r}
-#reg.fin <- lm(n~ HEURE10+HEURE11+HEURE13+HEURE14+HEURE16+HEURE17+HEURE8+TYPEJOURJeudi+TYPEJOURLundi+TYPEJOURMardi+TYPEJOURMercredi+TYPEJOURSamedi+TYPEJOURVendredi+VACANCES,data=trainingset_l)
-#summary(reg.fin)
-```
-
-
-```{r}
-#predict(reg.fin,testingset_l[,-31],interval="pred")
-```
-
-
 ```{r}
 yvsypred_l = data.frame(yreel = testingset_l$freq,  X1 = abs(round(predict(reg.fin, testingset_l, type = "response"),digit=0)))
 names(yvsypred_l)[names(yvsypred_l)=="X1"] <- "ypred"
 
-ggplot(yvsypred_l,aes(x = yreel, y = value)) + 
-                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+
+ggplot(yvsypred_l,aes(x = yreel, y = ypred)) + 
+                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+ xlim(0, 400)+ ylim(0,400)
   
 ggtitle("Résultats MCO sur  test: y prédit en fonction de y réel")
 ```
@@ -295,6 +280,7 @@ newY <- testingset_l$freq
 newX <- as.matrix( testingset_l[, -c(31)] )
 ```
 
+
 ```{r}
 ridge <- glmnet(mdlX, mdlY, family ="poisson" , lambda = cv2$lambda.1se, alpha = 0, trace.it = TRUE)
 ```
@@ -306,13 +292,11 @@ prev.class.ridge <- predict(ridge, newX, type="response")
 ```{r}
 yvsypred = data.frame(yreel = newY,  X1 = round(predict(ridge, newX, type = "response"),digit=0))
 names(yvsypred)[names(yvsypred)=="s0"] <- "ypred"
-ggplot(yvsypred,aes(x = yreel, y = value)) + 
-                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+
+ggplot(yvsypred,aes(x = yreel, y = ypred)) + 
+                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+ xlim(0,400) + ylim(0,400)
 ggtitle("")
 ```
-```{r}
-ridge_cv1 <- glmnet(mdlX, mdlY, family ="poisson" , lambda = cv1$lambda.1se, alpha = 0, trace.it = TRUE)
-```
+
 
 
 
