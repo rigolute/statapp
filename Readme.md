@@ -1,1 +1,1 @@
-Ceci est le Git assoscié à notre projet Statapp.
+Ceci est le Git associé à notre projet Statapp.
