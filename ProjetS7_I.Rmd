@@ -1,0 +1,1095 @@
+---
+title: "Projet Transdev"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Projet transdev
+On dispose de données de validation de titres de transport, à Toulon, en 2019. Le but est de proposer une modélisation du traffic suivant les moments et les lieux (lignes ou arrêts) afin de déterminer des possibilités d'optimisation du service ferroviaire.
+
+
+
+```{r}
+library(dplyr)
+library(magrittr)
+library(lubridate)
+library(ggplot2)
+library(tidyverse)
+library(sf)
+library(caret)
+library(class)
+library(factoextra)
+library(ggmap)
+library(osmdata)
+library(geosphere)
+library(grid)
+library(lattice)
+library(modeltools)
+library(stats4)
+library(flexclust)
+library(keras)
+library(MASS)
+library(DAAG)
+library(xts)
+library(tseries)
+library(Metrics)
+library(forecast)
+library(tseries)
+library(caschrono)
+```
+
+## 1°) Lecture des données et descriptions
+
+### 1.1°) Lecture
+
+
+#### 1.1.1°) Extraction des données
+```{r}
+df <- read.csv("./validations_Toulon_2019.csv", header = TRUE, sep= ";", na.strings = "")
+```
+
+#### 1.1.2°) Gestion des dates
+
+Transformation des dates en format Date ou datetime.
+```{r}
+df %<>%
+  mutate(DATETIME= as_datetime(DATETIME, format= "%Y-%m-%d %H:%M:%S"))
+df %<>%
+  mutate(HORAIRE= as_datetime(HORAIRE, format= "%H:%M:%S"))
+
+df %<>% mutate(DAY= as.Date(DAY, format= "%d/%m/%Y"))
+```
+
+
+#### 1.1.3) Renommage de certaines variables (TYPE.JOUR et Nom_arret), suppression de PH et création de FERIE et SCOLAIRE (2 autres variables)
+On renomme des colonnes pour pouvoir les appeler plus facilement. On décompose également la variable PH qui désigne les jours spéciaux (fériés, scolaires=PVS, fériés ou jour de l'an, NAN) en plusieurs variables : FERIE (=0 si pas férié, =1 sinon), SCOLAIRE (=1 si vacances, =0 sinon). Ici, on crée la variable FERIE, dans le bloc d'après on lui attribue les bonnes valeurs et dans le bloc suivant, on va créer la variable SCOLAIRE et lui affecter aussi les bonnes valeurs.
+```{r}
+names(df)[names(df)=="TYPE.JOUR"] <- "TYPEJOUR"
+names(df)[names(df)=="Nom_arret"] <- "ARRET"
+names(df)[names(df)=="PH"] <- "FERIE"
+```
+
+
+Complétion de la variable FERIE
+```{r}
+df$FERIE <- "0"
+df <- df %>% mutate(FERIE = replace(FERIE, which(DAY %in% c(as.Date("2019-01-01"),as.Date("2019-04-21"),as.Date("2019-04-22"),as.Date("2019-05-01"),as.Date("2019-05-08"),as.Date("2019-05-30"),as.Date("2019-06-09"),as.Date("2019-06-10"),as.Date("2019-07-14"),as.Date("2019-08-15"),as.Date("2019-11-01"),as.Date("2019-11-11"),as.Date("2019-12-25"))), "1"))
+df$FERIE = as.integer(df$FERIE)
+```
+
+Création et complétion de la variable SCOLAIRE. Pour cela, on commence par repérer tous les jours de vacances scolaires et on les met dans le vecteur vacances.
+```{r echo=FALSE}
+vacances = seq(as.Date("2019-01-01"), by = "day", length.out = 6)
+vacances = c(vacances,seq(as.Date("2019-02-09"), by = "day", length.out = 16))
+vacances = c(vacances,seq(as.Date("2019-04-06"), by = "day", length.out = 17))
+vacances = c(vacances,seq(as.Date("2019-05-29"), by = "day", length.out = 5))
+vacances = c(vacances,seq(as.Date("2019-07-06"), by = "day", length.out = 58))
+vacances = c(vacances,seq(as.Date("2019-10-19"), by = "day", length.out = 16))
+vacances = c(vacances,seq(as.Date("2019-12-21"), by = "day", length.out = 11))
+
+
+df$SCOLAIRE  = 1
+df <- df %>% mutate(SCOLAIRE = replace(SCOLAIRE, which(DAY %in% vacances), 0))
+df$SCOLAIRE = as.integer(df$SCOLAIRE)
+```
+
+### 1.2°) Analyse des données, complétion et premières descriptions
+
+#### 1.2.1°) Traitement des données manquantes
+
+Regardons les données qui restent manquantes :
+```{r echo=FALSE}
+nbBusNA = sum(is.na(df$CBus))
+nbRAPIDONA = sum(is.na(df$Code_RAPIDO))
+nbArretsNA = sum(is.na(df$ARRET))
+nblatNA = sum(is.na(df$Latitude))
+nblongNA = sum(is.na(df$Longitude))
+nbidentNA = sum(is.na(df$IDENT))
+nbtypejourNA = sum(is.na(df$TYPEJOUR))
+nbtypetransactionNA = sum(is.na(df$TYPETRANSACTION))
+nbsensNA = sum(is.na(df$SENS))
+print(paste0("Il y a ", nbRAPIDONA, " code rapido, arrêts, longitude, latitude, ident qui sont manquants. Et aussi ", nbsensNA, " types de jour et sens qui manquent."))
+```
+
+
+
+On peut facilement compléter les jours manquants :
+```{r echo=FALSE}
+df$TYPEJOUR <- weekdays(df$DAY)
+```
+
+
+
+
+Pour les autres valeurs manquantes, on pourrait vouloir les imputer. Cependant, cela va fausser les statistiques étant donné qu'on a déjà toutes les lignes et tous les instants. On peut donc
+supprimer les données manquantes.
+
+```{r echo=FALSE}
+df = na.omit(df)
+```
+Rque : en regardant la largeur du tableau après avoir tirer les na, on s'aperçoit que les valeurs manquantes étaient bien sur les mêmes 1750152 lignes (=nb de lignes avec données d'arrêts manquantes).
+
+#### 1.2.2°) Premières descriptions des données
+
+##### 1.2.2.1°) Nombres de valeurs prises par chaque variable
+
+Recherche du nombre de valeurs possibles pour les différents paramètres :
+```{r echo=FALSE}
+nbLignes = length(levels(as.factor(df$LIGNE)))
+print(paste0("Il y a ", nbLignes," lignes."))
+nbBus = length(levels(as.factor(df$BUS)))
+print(paste0("Il y a ", nbBus," bus"))
+nbArrets = length(levels(as.factor(df$ARRET)))
+print(paste0("Il y a ",nbArrets," arrêts"))
+nbTypesTransactions = length(levels(as.factor(df$TYPETRANSACTION)))
+print(paste0("Il y a ",nbTypesTransactions," types de transactions:"))
+print(levels(as.factor(df$TYPETRANSACTION)))
+```
+
+##### 1.2.2.2°) Barplot de la fréquentation dans la semaine
+Regardons comment les trajets se répartissent en pourcentages sur les jours de la semaine :
+```{r echo=FALSE}
+StatsJours = as.data.frame(table(unlist(df$TYPEJOUR)))
+StatsJours[,2] = StatsJours[,2]/(length(df[,1]))
+StatsJours
+```
+
+```{r echo=FALSE}
+barplot(c(Lundi=StatsJours[3,2],Mardi=StatsJours[4,2],Mercredi=StatsJours[5,2],Jeudi=StatsJours[2,2],Vendredi=StatsJours[7,2],Samedi=StatsJours[6,2],Dimanche = StatsJours[1,2]),col="lightgreen")
+grid(nx = NA, ny = NULL, lty = 2, col = "gray", lwd = 1)
+```
+
+
+
+
+##### 1.2.2.3°) Recherche de lignes qui accapareraient plus de 2% du traffic
+Répartition des validations par ligne
+```{r echo=FALSE}
+StatsLignes = as.data.frame(table(unlist(df$LIGNE))) #recherche pour chaque linge du nombre total de validations
+StatsLignes[,2] = StatsLignes[,2]/length(df[,1])# passage en fréquences
+StatsLignes = arrange(StatsLignes,Freq)
+LignesPopulaires = subset(StatsLignes, Freq>0.02)
+LignesPopulaires
+```
+
+
+
+
+##### 1.2.2.4°) Recherche de arrêts qui accapareraient plus de 2% du traffic
+Répartition des validations par arrêt
+```{r echo=FALSE}
+StatsArrets = as.data.frame(table(unlist(df$ARRET)))
+StatsArrets$nbMoyenValidationDansHeure = StatsArrets$Freq/(24*365) #Calcul du nombre moyen de validations par heure et par arrêt
+StatsArrets[,2] = StatsArrets[,2]/(length(df[,1]))
+StatsArrets = arrange(StatsArrets,desc(Freq)) #tri par ordre croissant
+ArretsPopulaires = subset(StatsArrets, Freq>0.02)
+ArretsPopulaires
+```
+
+##### 1.2.2.5°) Recherche des fréquences d'apparition des catégories tarifaires
+Répartition par catégorie tarifaire
+```{r echo=FALSE}
+StatsCodeProduit = as.data.frame(table(unlist(df$CODEPRODUIT)))
+StatsCodeProduit[,2] = StatsCodeProduit[,2]/(length(df[,1]))
+StatsCodeProduit = arrange(StatsCodeProduit,desc(Freq)) #tri par ordre décroissant
+StatsCodeProduit
+```
+
+
+##### 1.2.2.6°) Analyse des jours spéciaux
+
+But : comparer la fréquentation quotidienne moyenne que le jour soit férié ou non et scolaire ou non.
+
+```{r echo=FALSE}
+Scolaire = c(Ordinaire = length(which(df$SCOLAIRE==1 & df$FERIE==0, arr.ind=TRUE))/237,Ferie = length(which(df$SCOLAIRE==1 & df$FERIE==1, arr.ind=TRUE))/5)
+Vacances = c(Ordinaire = length(which(df$SCOLAIRE==0 & df$FERIE==0, arr.ind=TRUE))/115,Ferie = length(which(df$SCOLAIRE==0 & df$FERIE==1, arr.ind=TRUE))/8)
+```
+
+```{r echo=FALSE}
+frequentationSuivantJour <- rbind(Scolaire, Vacances)
+barplot(frequentationSuivantJour,beside = TRUE, col = c("dodgerblue3", "lightgreen"),legend.text = c("Scolaire","Vacances"))
+grid(nx = NA, ny = NULL, lty = 2, col = "gray", lwd = 1)
+```
+
+##### 1.2.2.7°) Barplot de la fréquentation sur une journée de semaine
+
+###### En moyenne sur lundi, mardi, mercredi, jeudi et vendredi
+Création d'une nouvelle variable correspondant à l'heure, dans le but d'afficher la distribution journalière :
+```{r}
+x = as.POSIXct(x = df$HORAIRE, format = "%Y-%m-%d %H:%M:%S")
+df$HEURE <- format(x, "%H")
+```
+
+Création d'un dataframe avec les fréquences de validations par heure sur un jour de semaine :
+```{r}
+StatsSemaine = as.data.frame(table(unlist(df[df$TYPEJOUR %in% c("Lundi","Mardi", "Mercredi","Jeudi","Vendredi"),]$HEURE)))
+
+StatsSemaine[,2] = StatsSemaine[,2]/(length(df[df$TYPEJOUR %in% c("Lundi","Mardi", "Mercredi","Jeudi","Vendredi"),]$HEURE))
+```
+
+```{r}
+StatsSemaine
+```
+
+```{r}
+p<-ggplot(data=StatsSemaine, aes(x=Var1, y=Freq)) +
+  geom_bar(stat="identity", color="black", fill='lightgreen') + ggtitle("Distribution des validations sur un jour de semaine") + xlab("Heure") + ylab("Fréquence")
+p
+```
+
+On remarque que les heures les plus fréquentées sont évidemment les heures de pointe (de 7h à 9h et de 16h à 18h).
+
+Regrouper en tranches de 2h ?
+
+###### Pour jeudi
+```{r}
+StatsJeudi = as.data.frame(table(unlist(df[df$TYPEJOUR == "Jeudi",]$HEURE)))
+
+# StatsJeudi = as.data.frame(table(unlist(filter(df, TYPEJOUR == "Jeudi" )$HEURE)))
+
+StatsJeudi[,2] = StatsJeudi[,2]/(length(df[df$TYPEJOUR == "Jeudi",]$HEURE))
+```
+
+```{r}
+pjeudi<-ggplot(data=StatsJeudi, aes(x=Var1, y=Freq)) +
+  geom_bar(stat="identity", color="black", fill='lightgreen') + ggtitle("Distribution des validations sur un jeudi") + xlab("Heure") + ylab("Fréquence")
+pjeudi
+```
+###### Pour mardi
+```{r}
+StatsMardi = as.data.frame(table(unlist(df[df$TYPEJOUR == "Mardi",]$HEURE)))
+
+StatsMardi[,2] = StatsMardi[,2]/(length(df[df$TYPEJOUR == "Mardi",]$HEURE))
+```
+
+```{r}
+pmardi<-ggplot(data=StatsMardi, aes(x=Var1, y=Freq)) +
+  geom_bar(stat="identity", color="black", fill='lightgreen') + ggtitle("Distribution des validations sur un mardi") + xlab("Heure") + ylab("Fréquence")
+pmardi
+```
+
+
+
+##### 1.2.2.8°) Barplot de la fréquentation sur un jour de week-end
+#
+#
+# ###### En général
+# Création d'un dataframe avec les fréquences de validations par heure sur un jour de week-end :
+```{r}
+StatsHeuresWE = as.data.frame(table(unlist(df[df$TYPEJOUR%in% c("Samedi","Dimanche"),]$HEURE)))
+StatsHeuresWE[,2] = StatsHeuresWE[,2]/(length(df[df$TYPEJOUR%in% c("Samedi","Dimanche"),]$HEURE))
+```
+
+```{r}
+p<-ggplot(data=StatsHeuresWE, aes(x=Var1, y=Freq)) +
+  geom_bar(stat="identity", color="black", fill='lightgreen') + ggtitle("Distribution des validations sur un jour le week-end") + xlab("Heure") + ylab("Fréquence")
+p
+```
+
+- Le matin, les heures les plus fréquentées se situent un peu plus tard qu'en semaine (de 10h à 12h)
+- A peu près la même distribution le soir
+
+###### Pour samedi
+```{r}
+StatsSamedi = as.data.frame(table(unlist(df[df$TYPEJOUR%in% c("Samedi"),]$HEURE)))
+
+StatsSamedi[,2] = StatsSamedi[,2]/(length(df[df$TYPEJOUR%in% c("Samedi"),]$HEURE))
+```
+
+```{r}
+psamedi<-ggplot(data=StatsSamedi, aes(x=Var1, y=Freq)) +
+  geom_bar(stat="identity", color="black", fill='lightgreen') + ggtitle("Distribution des validations sur un samedi") + xlab("Heure") + ylab("Fréquence")
+psamedi
+```
+
+##### 1.2.2.9°) Barplot de la fréquentation mensuelle
+
+Création d'une nouvelle variable correspondant au jour du mois, dans le but d'afficher la distribution mensuelle des validations :
+```{r}
+y = as.POSIXlt(x = df$DATETIME, format = "%Y-%m-%d %H:%M:%S")
+df$DAYNUMBER <- format(y, "%d")
+```
+
+Création d'un dataframe avec les fréquences de validations par jour du mois :
+```{r}
+StatsJourMois = as.data.frame(table(unlist(df$DAYNUMBER)))
+StatsJourMois[,2] = StatsJourMois[,2]/(length(df[,1]))
+```
+
+```{r}
+p<-ggplot(data=StatsJourMois, aes(x=Var1, y=Freq)) +
+  geom_bar(stat="identity", color="black", fill='lightgreen') + ggtitle("Distribution mensuelle des validations") + xlab("Jour du mois") + ylab("Fréquence")
+p
+```
+
+- Regroupement en semaine dans le mois ?
+- Fréquence légèrement + faible le 1er du mois ?
+- Fréquence plus faible le 31ème jour car pas de 31ème jour dans certains mois.
+
+
+# 2°) Clustering des lignes 
+
+## 2.1°) Préparation des données
+
+```{r}
+remove(dfTypeJour1_ligne)
+remove(df1_ligne)
+
+remove(dfTypeJour2_ligne)
+remove(df2_ligne)
+
+remove(dfTypeJour3_ligne)
+remove(df3_ligne)
+
+remove(dfTypeJour4_ligne)
+remove(df4_ligne)
+```
+
+```{r}
+dfTypeJour1_ligne = subset.data.frame(df,df$TYPEJOUR == "Dimanche" | df$FERIE == 1)[,c("LIGNE","HORAIRE")]
+dfTypeJour1_ligne$HORAIRE = hour(dfTypeJour1_ligne$HORAIRE)
+
+dfTypeJour1_ligne = dfTypeJour1_ligne %>% count(c("HORAIRE", "LIGNE"))
+```
+
+```{r echo=FALSE}
+dfTypeJour2_ligne = subset.data.frame(df,df$TYPEJOUR == "Samedi" & df$FERIE == 0)[,c("LIGNE","HORAIRE")]
+dfTypeJour2_ligne$HORAIRE = hour(dfTypeJour2_ligne$HORAIRE)
+
+dfTypeJour2_ligne = dfTypeJour2_ligne %>% count(c("HORAIRE", "LIGNE"))
+```
+
+```{r echo=FALSE}
+dfTypeJour3_ligne = subset.data.frame(df,df$TYPEJOUR %in% c("Lundi","Mardi","Mercredi","Jeudi","Vendredi") & df$FERIE == 0 & df$SCOLAIRE == 1)[,c("LIGNE","HORAIRE")]
+dfTypeJour3_ligne$HORAIRE = hour(dfTypeJour3_ligne$HORAIRE)
+
+dfTypeJour3_ligne = dfTypeJour3_ligne %>% count(c("HORAIRE", "LIGNE"))
+```
+
+```{r echo=FALSE}
+dfTypeJour4_ligne = subset.data.frame(df,df$TYPEJOUR %in% c("Lundi","Mardi","Mercredi","Jeudi","Vendredi") & df$FERIE == 0 & df$SCOLAIRE == 0)[,c("LIGNE","HORAIRE")]
+dfTypeJour4_ligne$HORAIRE = hour(dfTypeJour4_ligne$HORAIRE)
+
+dfTypeJour4_ligne = dfTypeJour4_ligne %>% count(c("HORAIRE", "LIGNE"))
+```
+
+```{r echo=FALSE}
+labels_ligne = StatsLignes$Var1
+heures = c(0,1,seq(5,23))
+```
+
+Pour mettre à l'échelle entre 0 et 1 :
+```{r echo=FALSE}
+echelle <- function(df){
+  for (k in 1:length(df[1,])){
+    maximum = max(na.omit(df[,k]))
+    minimum = min(na.omit(df[,k]))
+    df[,k] = (df[,k]-minimum)/(maximum-minimum)
+  }
+  return(df)
+}
+```
+
+```{r echo=FALSE}
+df1_ligne = data.frame(matrix(0, ncol = 24, nrow = 53))
+rownames(df1_ligne) <- labels_ligne
+for (k in 1:length(dfTypeJour1_ligne[,1])){
+  df1_ligne[c(dfTypeJour1_ligne$LIGNE[k]),dfTypeJour1_ligne$HORAIRE[k]+1]=dfTypeJour1_ligne$freq[k]
+}
+```
+
+
+```{r echo=FALSE}
+dfTypeJour1_ligne = df1_ligne
+df1_ligne <- echelle(df1_ligne)
+df1_ligne = df1_ligne[ , colSums(is.na(df1_ligne)) < nrow(df1_ligne)]
+df1_ligne <- na.omit(df1_ligne)
+```
+
+```{r echo=FALSE}
+df2_ligne = data.frame(matrix(0, ncol = 24, nrow = 53))
+rownames(df2_ligne) <- labels_ligne
+for (k in 1:length(dfTypeJour2_ligne[,1])){
+  df2_ligne[c(dfTypeJour2_ligne$LIGNE[k]),dfTypeJour2_ligne$HORAIRE[k]+1]=dfTypeJour2_ligne$freq[k]
+}
+dfTypeJour2_ligne = df2_ligne
+df2_ligne <- echelle(df2_ligne)
+df2_ligne = df2_ligne[ , colSums(is.na(df2_ligne)) < nrow(df2_ligne)]
+df2_ligne <- df2_ligne[,-3]
+df2_ligne <- na.omit(df2_ligne)
+df2_ligne["70",] <- df2_ligne[54,]
+df2_ligne <- df2_ligne[-54,]
+```
+
+```{r echo=FALSE}
+df3_ligne = data.frame(matrix(0, ncol = 24, nrow = 53))
+rownames(df3_ligne) <- labels_ligne
+for (k in 1:length(dfTypeJour3_ligne[,1])){
+  df3_ligne[c(dfTypeJour3_ligne$LIGNE[k]),dfTypeJour3_ligne$HORAIRE[k]+1]=dfTypeJour3_ligne$freq[k]
+}
+dfTypeJour3_ligne = df3_ligne
+df3_ligne <- echelle(df3_ligne)
+df3_ligne = df3_ligne[ , colSums(is.na(df3_ligne)) < nrow(df3_ligne)]
+df3_ligne <- na.omit(df3_ligne)
+df3_ligne["70",] <- df3_ligne[54,]
+df3_ligne["180",] <- df3_ligne[55,]
+df3_ligne["280",] <- df3_ligne[56,]
+df3_ligne <- df3_ligne[-54:-56,]
+```
+
+```{r echo=FALSE}
+df4_ligne = data.frame(matrix(0, ncol = 24, nrow = 53))
+rownames(df4_ligne) <- labels_ligne
+for (k in 1:length(dfTypeJour4_ligne[,1])){
+  df4_ligne[c(dfTypeJour4_ligne$LIGNE[k]),dfTypeJour4_ligne$HORAIRE[k]+1]=dfTypeJour4_ligne$freq[k]
+}
+dfTypeJour4_ligne = df4_ligne
+df4_ligne <- echelle(df4_ligne)
+df4_ligne = df4_ligne[ , colSums(is.na(df4_ligne)) < nrow(df4_ligne)]
+df4_ligne <- na.omit(df4_ligne)
+df4_ligne["70",] <- df4_ligne[54,]
+df4_ligne["180",] <- df4_ligne[55,]
+df4_ligne["280",] <- df4_ligne[56,]
+df4_ligne <- df4_ligne[-54:-56,]
+```
+
+```{r echo=FALSE}
+dataAClusterParLigne = cbind(df1_ligne,df2_ligne,df3_ligne,df4_ligne)
+```
+
+## 2.2) Classification Ascendante Hiérarchique 
+
+```{r}
+# calcul des distances euclidiennes entre les points 
+lignes.dist <- dist(dataAClusterParLigne)
+```
+
+```{r}
+cah.ward <- hclust(lignes.dist, method="ward")
+print(cah.ward)
+```
+
+```{r}
+plot(cah.ward)
+```
+
+```{r}
+groupes.cah <- cutree(cah.ward,k=4)
+```
+
+Affichage du dendrogramme pour un nb de clusters choisi
+```{r}
+# remplacer 4 par le nb de clusters choisi
+nbClasses=4
+source("http://addictedtor.free.fr/packages/A2R/lastVersion/R/code.R")
+ordreClasses <- unique(groupes.cah[cah.ward$order])
+cPal <- c(1:nbClasses)[ordreClasses]
+
+A2Rplot(x = cah.ward,
+        k = nbClasses,
+        boxes = FALSE,
+        col.up = "gray50",
+        col.down = cPal,
+        show.labels = TRUE,
+        
+        main = "Dendrogramme")
+
+legend(x="topleft",
+       paste("Cluster",
+             1:nbClasses,
+             sep=" "),
+       cex=1,
+       seg.len=4,
+       col=cPal,
+       pch=NA,
+       lty=1,
+lwd=4)
+```
+
+```{r}
+groupes.cah
+```
+
+## 2.3) Représentations des clusters
+
+Représentation des trajets/h en moyenne pour chaque cluster suivant le type de jour (GR1 de 0 à 23, GR2 de 24 à 48...) :
+```{r}
+dfTousTypesJours_ligne = cbind(dfTypeJour1_ligne,dfTypeJour2_ligne,dfTypeJour3_ligne,dfTypeJour4_ligne)
+dfTousTypesJours_ligne <- na.omit(dfTousTypesJours_ligne)
+```
+
+#Affichage nombre moyen de validations pour k=4 clusters
+```{r}
+new_df <-  t ( data.frame( cluster1= rep(0, times=96) , cluster2= rep(0, times=96), cluster3= rep(0, times=96), cluster4=rep(0, times=96) ) ) 
+
+s1 <- 0
+s2 <- 0
+s3 <- 0
+s4 <- 0
+
+for (i in 1:53) 
+  if ( unname(groupes.cah)[i]==1 ){
+    s1 <- s1 + 1
+    for (k in 1:96)
+      new_df[1,k] = new_df[1,k] + dfTousTypesJours_ligne[i,k]
+  } else if ( unname(groupes.cah)[i]==2 ) {
+    s2 <- s2 + 1
+    for (k in 1:96)
+      new_df[2,k] = new_df[2,k] + dfTousTypesJours_ligne[i,k]
+ } else if ( unname(groupes.cah)[i]==3 ){
+    s3 <- s3 + 1
+    for (k in 1:96)
+      new_df[3,k] = new_df[3,k] + dfTousTypesJours_ligne[i,k]
+ } else if ( unname(groupes.cah)[i]==4 ){
+    s4 <- s4 + 1
+    for (k in 1:96)
+      new_df[4,k] = new_df[4,k] + dfTousTypesJours_ligne[i,k]
+ }
+
+for (i in 1:53) 
+  new_df[1,i] = new_df[1,i] / s1
+  new_df[2,i] = new_df[2,i] / s2
+  new_df[3,i] = new_df[3,i] / s3
+  new_df[4,i] = new_df[4,i] / s4
+```
+
+```{r}
+new_df3 <-  data.frame( nb= rep(0, times=384) , cluster= rep(0, times=384), heure = rep(seq(1:96), times=4)) 
+
+for (i in 1:96){
+  new_df3[i,1]  <-   new_df["cluster1",i]
+  new_df3[i,2]  =   1
+}
+for (i in 97:192){
+  new_df3[i,1]  <-   new_df["cluster2",i-96]
+  new_df3[i,2]  <-   2
+}
+for (i in 193:288){
+  new_df3[i,1]  <-   new_df["cluster3",i-192]
+  new_df3[i,2]  <-   3
+}
+for (i in 289:384){
+  new_df3[i,1]  <-   new_df["cluster4",i-288]
+  new_df3[i,2]  <-   4
+}
+
+ggplot(new_df3, aes(x= heure, y= nb, colour=cluster ))  + ggtitle("Moyennes de trajets/h suivant les clusters") + geom_point()
+```
+
+# 3) Modélisation en séries temporelles
+
+## 3.1) Prédiction sur le cluster de lignes le plus fréquenté 
+
+### 3.1.1) Création de la série temporelle
+
+```{r}
+serie2 = df[,c("DAY", "LIGNE", "DATETIME", "HEURE")]
+serie2 = serie2[ serie2$LIGNE %in% names(groupes.cah[unname(groupes.cah)==2]), ]
+serie2[,"DATETIME"] = ceiling_date( serie2[,"DATETIME"], "hour")
+serie2 = serie2 %>% count(c("DATETIME"))
+```
+
+
+```{r}
+# Création d'un dataframe pour compléter les heures manquantes
+df2 <- data.frame(DateTime = seq(as.POSIXct("2019-01-01"),
+                                as.POSIXct("2020-01-01"), 
+                                by=(60*60)))
+colnames(df2)[colnames(df2) == "DateTime"] <- "DATETIME"
+
+data_with_missing_times <- full_join(df2,serie2)
+data_with_missing_times <- data_with_missing_times[-1,]
+```
+
+
+```{r}
+# Remplacer NA par 0
+data_with_missing_times[is.na(data_with_missing_times)] <- 0
+serie2 <- xts(data_with_missing_times[,-1], order.by=data_with_missing_times[,1])
+```
+
+```{r}
+ggtsdisplay(serie2, lag.max=400)
+
+ggtsdisplay( serie2[1:1500], lag.max=400)
+  
+# On applique 2 fois la méthode des différences (on zomme sur les 1500 premières valeurs pour un meilleur apercu)
+ggtsdisplay( diff( diff(serie2[1:1500], lag=24), lag=168 ), lag.max=400 )
+```
+
+### 3.1.2) Stationnarisation
+
+```{r}
+serie2 = ts(diff( diff(serie2, lag=24), lag=168 ),frequency=24)
+```
+
+```{r}
+pp.test(serie2)
+```
+```{r}
+install.packages(fUnitRoots)
+```
+
+```{r}
+adf <- adf.test(serie2) 
+```
+```{r}
+# Le test n'est valide que si les résidus de la régression ADF ne sont pas autocorrélés.
+# Créons comme dans le TD4 une fonction de test d'autocorrélation de Ljung-Box jusqu'à l'ordre 24
+Qtests <- function(series, k, fitdf=0) {
+  pvals <- apply(matrix(1:k), 1, FUN=function(l) {
+    pval <- if (l<=fitdf) NA else Box.test(series, lag=l, type="Ljung-Box", fitdf=fitdf)$p.value
+    return(c("lag"=l,"pval"=pval))
+  })
+  return(t(pvals))
+}
+# Vérifions l'autocorrélation des rédidus du test ADF
+Qtests(adf@test$lm$residuals,24,length(adf@test$lm$coefficients))
+```
+
+```{r}
+auto.arima(serie2)
+```
+
+```{r}
+model = tseries::arma(na.remove(serie2), order=c(4,0,3))
+plot(na.remove(serie2))
+lines(model$fitted.values, col='red')
+
+summary(model)
+```
+
+# Test de Ljung box
+```{r}
+Box.test(model$residuals, type="Ljung-Box")
+```
+
+# Zoom sur les 1500 premières valeurs (pour mieux observers les différences série brute/série prédite)
+```{r}
+serie2_2 = ts(diff( diff(serie2[1:1500], lag=24), lag=168 ),frequency=24)
+serie2_2 = ts( serie2[1:1500] )
+```
+
+```{r}
+model = tseries::arma(na.remove(serie2_2), order=c(5,0,4))
+plot(na.remove(serie2_2))
+lines(model$fitted.values, col='red')
+```
+
+## 3.2) Prédiction sur le cluster de fréquentation moyenne
+
+```{r}
+serie3 = df[,c("DAY", "LIGNE", "DATETIME", "HEURE")]
+
+serie3 = serie3[ serie3$LIGNE %in% names(groupes.cah[unname(groupes.cah)==3]), ]
+serie3[,"DATETIME"] = ceiling_date( serie3[,"DATETIME"], "hour")
+serie3 = serie3 %>% count(c("DATETIME"))
+
+# Heures manquantes 
+data_with_missing_times <- full_join(df2,serie3)
+
+# Remplacer NA par 0
+data_with_missing_times[is.na(data_with_missing_times)] <- 0
+serie3 <- xts(data_with_missing_times[,-1], order.by=data_with_missing_times[,1])
+```
+
+```{r}
+serie3 = ts(diff( diff( serie3, lag=24 ), lag=168),frequency=24)
+```
+
+```{r}
+auto.arima(serie3)
+```
+
+```{r}
+model = tseries::arma(na.remove(serie3), order=c(3,0,3))
+plot(na.remove(serie3))
+lines(model$fitted.values, col='red')
+
+summary(model)
+```
+
+# Test de Ljung box
+```{r}
+Box.test(model$residuals, type="Ljung-Box")
+```
+
+## 3.3) Prédiction sur le cluster très peu fréquenté (ne contenant que 3 lignes)
+
+```{r}
+serie4 = df[,c("DAY", "LIGNE", "DATETIME", "HEURE")]
+serie4 = serie4[ serie4$LIGNE %in% names(groupes.cah[unname(groupes.cah)==4]), ]
+serie4[,"DATETIME"] = ceiling_date( serie4[,"DATETIME"], "hour")
+serie4 = serie4 %>% count(c("DATETIME"))
+
+# Heures manquantes 
+data_with_missing_times <- full_join(df2,serie4)
+
+# Remplacer NA par 0
+data_with_missing_times[is.na(data_with_missing_times)] <- 0
+serie4 <- xts(data_with_missing_times[,-1], order.by=data_with_missing_times[,1])
+```
+
+```{r}
+serie4 = ts(diff( diff( serie4, lag=24 ), lag=168),frequency=24)
+```
+
+```{r}
+auto.arima(serie4)
+```
+
+```{r}
+model = tseries::arma(na.remove(serie4), order=c(4,0,1))
+plot(na.remove(serie4))
+lines(model$fitted.values, col='red')
+
+summary(model)
+```
+# Test de Ljung box
+```{r}
+Box.test(model$residuals, type="Ljung-Box")
+```
+
+## 3.4) Prédiction sur le dernier cluster, ne contenant que 2 lignes
+
+```{r}
+serie1 = df[,c("DAY", "LIGNE", "DATETIME", "HEURE")]
+serie1 = serie1[ serie1$LIGNE %in% names(groupes.cah[unname(groupes.cah)==1]), ]
+serie1[,"DATETIME"] = ceiling_date( serie1[,"DATETIME"], "hour")
+serie1 = serie1 %>% count(c("DATETIME"))
+
+# Heures manquantes 
+data_with_missing_times <- full_join(df2,serie1)
+
+# Remplacer NA par 0
+data_with_missing_times[is.na(data_with_missing_times)] <- 0
+serie1 <- xts(data_with_missing_times[,-1], order.by=data_with_missing_times[,1])
+```
+
+```{r}
+serie1 = ts(diff( diff( serie4, lag=24 ), lag=168),frequency=24)
+```
+
+```{r}
+auto.arima(serie1)
+```
+
+```{r}
+model = tseries::arma(na.remove(serie1), order=c(2,0,1))
+plot(na.remove(serie1))
+lines(model$fitted.values, col='red')
+
+summary(model)
+```
+
+# Test de Ljung box
+```{r}
+Box.test(model$residuals, type="Ljung-Box")
+```
+
+# 4) Modélisation par régression
+
+```{r}
+dfClusteringLignes <- data.frame(groupes.cah)
+dfClusteringLignes <- cbind(X = rownames(dfClusteringLignes), dfClusteringLignes)
+rownames(dfClusteringLignes) <- 1:nrow(dfClusteringLignes)
+dfClusteringLignes$LIGNE <- dfClusteringLignes$X
+names(dfClusteringLignes)[names(dfClusteringLignes) == "groupes.cah"] <- "GR"
+```
+
+# 4.1) Préparation des données pour la régression
+
+```{r echo=FALSE}
+#rm(list=setdiff(ls(), c("mad_map","df","dfclusteringTousTypesJours","labels", "labels_ligne", "groupes.cah" )))
+```
+
+```{r echo=FALSE}
+dfPourACP_l = df[,c("DAY", "LIGNE", "HEURE", "TYPEJOUR")]
+dfPourACP_l = dfPourACP_l %>% count(c("DAY", "LIGNE", "HEURE", "TYPEJOUR"))
+```
+
+On charge les données de pluie.
+```{r echo=FALSE}
+dfMeteo <- read.csv("./export-toulon2019.csv", header = TRUE, sep= ";", na.strings = "")
+dfMeteo$DATE = date(dfMeteo$DATE)
+dfMeteo = dfMeteo[,c(1,8)]
+```
+
+```{r echo=FALSE}
+# ajout des variables DATE, TYPEJOUR (lundi, mardi...), PRECIPITATIONS_MM, HEURE
+dfPourACP2_l = merge(data.frame(DATE = seq(as.Date("2019-01-01"), by = "day", length.out = 365),TYPEJOUR = weekdays(seq(as_datetime("2019-01-01"), by = "day", length.out = 365)),PRECIPITATIONS_MM = dfMeteo$PRECIP_TOTAL_DAY_MM),data.frame(HEURE = c(0,1,2,seq(5,23))))
+
+# ajout des lignes
+dfPourACP2_l = merge(dfPourACP2_l, data.frame(LIGNE=labels_ligne) )
+
+```
+
+On crée une liste avec les jours de vacances.
+```{r}
+vacances = seq(as.Date("2019-01-01"), by = "day", length.out = 6)
+vacances = c(vacances,seq(as.Date("2019-02-09"), by = "day", length.out = 16))
+vacances = c(vacances,seq(as.Date("2019-04-06"), by = "day", length.out = 17))
+vacances = c(vacances,seq(as.Date("2019-05-29"), by = "day", length.out = 5))
+vacances = c(vacances,seq(as.Date("2019-07-06"), by = "day", length.out = 58))
+vacances = c(vacances,seq(as.Date("2019-10-19"), by = "day", length.out = 16))
+vacances = c(vacances,seq(as.Date("2019-12-21"), by = "day", length.out = 11))
+```
+
+```{r echo=FALSE}
+# ajout de la variable VACANCES et de la variable FERIE
+
+dfPourACP2_l = merge(dfPourACP2_l,data.frame(DATE = c(as.Date("2019-01-01"),as.Date("2019-04-21"),as.Date("2019-04-22"),as.Date("2019-05-01"),as.Date("2019-05-08"),as.Date("2019-05-30"),as.Date("2019-06-09"),as.Date("2019-06-10"),as.Date("2019-07-14"),as.Date("2019-08-15"),as.Date("2019-11-01"),as.Date("2019-11-11"),as.Date("2019-12-25")),FERIE = seq(1, by =0, length.out = 13)), by.x = c("DATE"), by.y = c("DATE"),all=TRUE)
+```
+
+
+```{r echo=FALSE}
+dfPourACP2_l = merge(dfPourACP2_l,data.frame(DATE = vacances, VACANCES = seq(1, by =0, length.out = length(vacances))), by.x = c("DATE"), by.y = c("DATE"),all=TRUE)
+```
+
+On rajoute ensuite le décompte des validations au tableau final. Pour cela, on le prélève du tableau dfPourACP. 
+```{r echo=FALSE}
+dfPourACP2_l$HEURE = paste(dfPourACP2_l$HEURE)
+```
+
+```{r echo=FALSE}
+dfPourACP_l$HEURE = paste(as.integer(dfPourACP_l$HEURE))
+dfPourACP2_l$LIGNE = paste(dfPourACP2_l$LIGNE)
+```
+
+```{r echo=FALSE}
+dfPourACP2_l = merge(dfPourACP2_l,dfPourACP_l[,c(1,2,3,4,5)],by.x = c("DATE","HEURE","LIGNE", "TYPEJOUR"),by.y = c("DAY","HEURE","LIGNE","TYPEJOUR"),all=TRUE)
+```
+
+```{r echo=FALSE}
+dfPourACP2_l[is.na(dfPourACP2_l)] <- 0
+```
+
+On divise le tableau de données pour la régression en 4 afin d'en avoir 1 nouveau par cluster.
+```{r echo=FALSE}
+dfCluster1_l = dfPourACP2_l[ dfPourACP2_l$LIGNE %in% names(groupes.cah[unname(groupes.cah)==1]),]
+dfCluster2_l = dfPourACP2_l[ dfPourACP2_l$LIGNE %in% names(groupes.cah[unname(groupes.cah)==2]),]
+dfCluster3_l = dfPourACP2_l[ dfPourACP2_l$LIGNE %in% names(groupes.cah[unname(groupes.cah)==3]),]
+dfCluster4_l = dfPourACP2_l[ dfPourACP2_l$LIGNE %in% names(groupes.cah[unname(groupes.cah)==4]),]
+```
+
+One-hot encoding
+```{r echo=FALSE}
+oneHotEncode <- function(df0){
+  dmy <- dummyVars(" ~ .", data = df0)
+  return(data.frame(predict(dmy, newdata = df0)))
+}
+```
+
+Pour standardiser la variable de précipitations :
+```{r echo=FALSE}
+standardise <- function(df0,colonne){
+  maxCol = max(df0[,c(colonne)])
+  minCol = min(df0[,c(colonne)])
+  df0[,c(colonne)]= (df0[,c(colonne)]- minCol)/(maxCol-minCol)
+}
+```
+
+One-hot encoding + standardisation.
+```{r echo=FALSE}
+prepare_dfCluster <- function(df0, colonne){
+  print(mean(df0$freq))
+  df0 = df0[,-c(1,3)]  #on tire la variable date et l'arrêt
+  print(mean(df0$freq))
+  df0 = oneHotEncode(df0)
+  print(mean(df0$freq))
+  standardise(df0,colonne)
+  print(mean(df0$freq))
+  return(df0)
+}
+```
+
+Préparation des tableaux pour la régression (one-hot encoding + standardisation)
+```{r echo=FALSE}
+dfCluster1_l = prepare_dfCluster(dfCluster1_l, "PRECIPITATIONS_MM")
+dfCluster2_l = prepare_dfCluster(dfCluster2_l, "PRECIPITATIONS_MM")
+dfCluster3_l = prepare_dfCluster(dfCluster3_l, "PRECIPITATIONS_MM")
+dfCluster4_l = prepare_dfCluster(dfCluster4_l, "PRECIPITATIONS_MM")
+```
+
+rmse
+```{r echo=FALSE}
+rmse <- function(y,ypred)
+{
+    sqrt(mean((y-ypred)^2))
+}
+```
+
+mae
+```{r echo=FALSE}
+mae <- function(y,ypred)
+{
+    mean(abs(y-ypred))
+}
+```
+
+Fonction pour créer une variable HEURE à partir des 22 précédentes et une variable JOURS à la place des 7 précédentes (jours de la semaine). On fait cela par LDA pour que ce soit supervisé ce qui semble être un avantage par rapport à la PCA. Le tableau obtenu est retourné.
+```{r echo=FALSE}
+reductionDimensionParLDA <- function(df0){
+  ldamodel = lda(n~., data=df0[c(seq(24,29),33)])
+  JOURS = as.matrix(df0[seq(24,29)])%*%as.matrix(ldamodel$scaling[,1])
+  ldamodel = lda(n~., data=df0[c(seq(1,12),seq(14,22),33)])
+  HEURES = as.matrix(df0[c(seq(1,12),seq(14,22))])%*%as.matrix(ldamodel$scaling[,1])
+  return(data.frame(JOURS = JOURS, HEURES = HEURES, FERIE = df0$FERIE, VACANCES = df0$VACANCES, PRECIPITATIONS = df0$PRECIPITATIONS_MM,n = df0$freq))
+}
+```
+
+Fonction qui applique cette fois la lda à tout le jeu de données pour en retirer 5 composantes explicatives. On retourne le tableau final obtenu.
+```{r echo=FALSE}
+reductionDimensionParLDA2 <- function(df0){
+  ldamodel = lda(n~., data=df0[c(seq(1,12), seq(14,33))])
+  LDA1 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,1])
+  LDA2 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,2])
+  LDA3 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,3])
+  LDA4 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,4])
+  LDA5 = as.matrix(df0[c(seq(1,12), seq(14,32))])%*%as.matrix(ldamodel$scaling[,5])
+  return(data.frame(LDA1 = LDA1, LDA2 = LDA2,LDA3 = LDA3,LDA4 = LDA4,LDA5 = LDA5,n = df0$freq))
+}
+```
+
+## 4.2) Régression des MCO ordinaire
+
+
+```{r}
+#Colinéarité entre les variables
+dfCluster2_l$TYPEJOURDimanche <- NULL
+dfCluster2_l$HEURE2 <- NULL
+```
+
+```{r echo=FALSE}
+set.seed(2021)
+Trainingindex_l<-createDataPartition(dfCluster2_l$freq, p=0.8, list=FALSE) 
+trainingset_l<-dfCluster2_l[Trainingindex_l,] 
+testingset_l<-dfCluster2_l[-Trainingindex_l,] 
+
+trainingset_l$SEMAINE = trainingset_l$TYPEJOURLundi + trainingset_l$TYPEJOURMardi + trainingset_l$TYPEJOURMercredi + trainingset_l$TYPEJOURJeudi + trainingset_l$TYPEJOURVendredi
+
+testingset_l$SEMAINE = testingset_l$TYPEJOURLundi + testingset_l$TYPEJOURMardi + testingset_l$TYPEJOURMercredi + testingset_l$TYPEJOURJeudi + testingset_l$TYPEJOURVendredi
+```
+
+```{r}
+reg.mul <- lm(freq~., data=trainingset_l)
+```
+
+# Analyse des variables à conserver
+```{r}
+library(leaps)
+choix <- regsubsets(freq~.,data=trainingset_l,nbest=1,nvmax=25)
+plot(choix,scale="bic")
+```
+
+```{r}
+reg.fin <- lm(freq~. ,data=trainingset_l[,-c(1,2,14,15,16)])
+summary(reg.fin)
+```
+
+```{r}
+yvsypred_l = data.frame(yreel = testingset_l$freq,  X1 = abs(round(predict(reg.fin, testingset_l, type = "response"),digit=0)))
+names(yvsypred_l)[names(yvsypred_l)=="X1"] <- "ypred"
+
+ggplot(yvsypred_l,aes(x = yreel, y = ypred)) + 
+                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+ xlim(0, 400)+ ylim(0,400)
+  
+ggtitle("Résultats MCO sur  test: y prédit en fonction de y réel")
+```
+
+## 4.3) Régression ridge
+
+```{r}
+library(glmnet)
+ridge <- glmnet(as.matrix(trainingset_l[,1:30]),trainingset_l[,31],family="poisson", alpha=0)
+```
+
+```{r}
+mdlY <- trainingset_l$freq
+mdlX <- as.matrix(trainingset_l[, -c(31)])
+```
+
+# Assez long à faire tourner : le lancer permet de déterminer lambda.min (valeur de lambda qui minimise l'erreur) et lambda.1se (plus grande valeur de lambda pour laquelle l'erreur se situe à plus un écart type de l'erreur lambda.min). 
+# On trouve lambda.min = 0.2886835 et lambda.1se = 0.006737947
+
+```{r}
+# cv2 <- cv.glmnet(mdlX, mdlY, family =  "poisson" , nfold = 10, paralle = TRUE, alpha = 0, trace.it= TRUE)
+# plot(cv2)
+# cv2$lambda.1se
+# cv2$lambda.min
+```
+
+```{r}
+newY <- testingset_l$freq
+newX <- as.matrix( testingset_l[, -c(31)] )
+```
+
+# On met lambda = lambda.1se = 0.006737947 en argument
+```{r}
+ridge <- glmnet(mdlX, mdlY, family ="poisson" , lambda = 0.006737947, alpha = 0, trace.it = TRUE)
+```
+
+```{r}
+prev.class.ridge <- predict(ridge, newX, type="response")
+```
+
+```{r}
+yvsypred = data.frame(yreel = newY,  X1 = round(predict(ridge, newX, type = "response"),digit=0))
+names(yvsypred)[names(yvsypred)=="s0"] <- "ypred"
+ggplot(yvsypred,aes(x = yreel, y = ypred)) + 
+                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+ xlim(0,400) + ylim(0,400)
+ggtitle("")
+```
+
+# Ajout de variables d'interaction
+
+```{r}
+colnames(trainingset_l)[colnames(trainingset_l) == "VACANCES"] <- "ECOLE"
+colnames(testingset_l)[colnames(testingset_l) == "VACANCES"] <- "ECOLE"
+
+colnames(trainingset_l)[colnames(trainingset_l) == "FERIE"] <- "ORDINAIRE"
+colnames(testingset_l)[colnames(testingset_l) == "FERIE"] <- "ORDINAIRE"
+```
+
+```{r}
+ctrl <- trainControl(method = "cv", number = 5)
+```
+
+# On teste dans un premier temps avec toutes les variables d'interaction
+
+```{r}
+model <- train(freq ~ .*. , data = trainingset_l, method = "lm", trControl = ctrl)
+```
+
+```{r}
+yvsypred = data.frame(yreel = model$finalModel$model$.outcome,  X1 = abs(round(model$finalModel$fitted.values,digit=0)))
+names(yvsypred)[names(yvsypred)=="X1"] <- "ypred"
+ggplot(yvsypred,aes(x = yreel, y = value)) + 
+                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+ labs(y="validations prédites", x = "validations réelles")+
+ggtitle("Résultats MCO sur test pour le meilleur modèle")
+```
+
+```{r}
+summary(model$finalModel)
+```
+
+# On ne conserve que les variables signicatives
+
+```{r}
+model <- train(freq ~ HEURE0+HEURE6+HEURE7+HEURE8+HEURE9+HEURE10+HEURE11+HEURE12+HEURE13+HEURE14+HEURE15+HEURE16+HEURE17+HEURE18+HEURE19 + TYPEJOURJeudi + TYPEJOURLundi + TYPEJOURMardi + TYPEJOURMercredi  + TYPEJOURVendredi + ORDINAIRE  + ECOLE+ HEURE10:TYPEJOURJeudi + HEURE10:TYPEJOURLundi + HEURE10:TYPEJOURMardi+ HEURE10:TYPEJOURMercredi + HEURE10:TYPEJOURSamedi+ HEURE10:TYPEJOURVendredi+ HEURE10:PRECIPITATIONS_MM+ HEURE10:ORDINAIRE+ HEURE11:TYPEJOURJeudi+ HEURE11:TYPEJOURLundi+HEURE11:TYPEJOURMardi+HEURE11:TYPEJOURMercredi+ HEURE11:TYPEJOURSamedi +HEURE11:TYPEJOURVendredi + HEURE11:PRECIPITATIONS_MM+ HEURE11:ORDINAIRE+HEURE11:ECOLE +HEURE12:TYPEJOURJeudi+HEURE12:TYPEJOURLundi+HEURE12:TYPEJOURMardi+ HEURE12:TYPEJOURMercredi + HEURE12:TYPEJOURSamedi +HEURE12:TYPEJOURVendredi+ HEURE12:PRECIPITATIONS_MM +HEURE12:ORDINAIRE+HEURE12:ECOLE+HEURE13:TYPEJOURJeudi +HEURE13:TYPEJOURLundi+HEURE13:TYPEJOURMardi+HEURE13:TYPEJOURMercredi+HEURE13:TYPEJOURSamedi+ HEURE13:TYPEJOURVendredi + HEURE13:PRECIPITATIONS_MM +HEURE13:ORDINAIRE+HEURE13:ECOLE, data = trainingset_l, method = "lm", trControl = ctrl)
+```
+
+```{r}
+yvsypred = data.frame(yreel = model$finalModel$model$.outcome,  X1 = abs(round(model$finalModel$fitted.values,digit=0)))
+names(yvsypred)[names(yvsypred)=="X1"] <- "ypred"
+ggplot(yvsypred,aes(x = yreel, y = value)) + 
+                    geom_point(aes(y=ypred),color="#048B9A",size=0.1)+geom_line(aes(y=yreel),color="red",size=0.1)+ labs(y="validations prédites", x = "validations réelles")+
+ggtitle("Résultats MCO sur test pour le meilleur modèle")
+```
+
+```{r}
+summary(model$finalModel)
+```
